@@ -1,0 +1,54 @@
+name: Top.gg Auto Vote
+
+on:
+  schedule:
+    # 07:00 WIB = 00:00 UTC
+    - cron: '0 0 * * *'
+    # 19:00 WIB = 12:00 UTC
+    - cron: '0 12 * * *'
+  workflow_dispatch: # Manual trigger
+
+jobs:
+  vote:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Run vote
+        env:
+          TOKENS:       ${{ secrets.TOKENS }}
+          BOT_IDS:      ${{ secrets.BOT_IDS }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
+        run: python vote.py
+
+      - name: Clear old workflow runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "Deleting old run: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
+          echo "✅ Cleanup done — only latest run kept."
