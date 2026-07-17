@@ -32,10 +32,12 @@ DISCORD_LOGIN_URL = "https://discord.com/login"
 
 DEFAULT_BOT_IDS = ["830530156048285716"]
 
-TIMEOUT_OAUTH_MS = 15_000
+TIMEOUT_OAUTH_MS = 20_000
 TIMEOUT_VOTE_MS = 30_000
 DELAY_BETWEEN_BOTS_SEC = 3
 DELAY_BETWEEN_ACCOUNTS_SEC = 5
+MAX_RETRIES = 3
+RETRY_DELAY_SEC = 10
 
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
@@ -174,7 +176,7 @@ async def discord_oauth_login(page: Page, token: str, bot_ids: list[str]) -> boo
 
     # Step 1: Inject token into Discord
     print("  → Injecting Discord token...")
-    await page.goto(DISCORD_LOGIN_URL, wait_until="networkidle")
+    await page.goto(DISCORD_LOGIN_URL, wait_until="load")
     await screenshot(page, "screenshots/01_discord_login.png")
 
     await page.evaluate("""(token) => {
@@ -187,7 +189,7 @@ async def discord_oauth_login(page: Page, token: str, bot_ids: list[str]) -> boo
         iframe.remove();
     }""", token)
 
-    await page.reload(wait_until="networkidle")
+    await page.reload(wait_until="load")
     await asyncio.sleep(3)
     await screenshot(page, "screenshots/02_after_reload.png")
     dbg(f"After token inject: {page.url}")
@@ -197,7 +199,7 @@ async def discord_oauth_login(page: Page, token: str, bot_ids: list[str]) -> boo
     first_bot = bot_ids[0] if bot_ids else "830530156048285716"
     vote_url = f"https://top.gg/bot/{first_bot}/vote"
     print("  → Navigating to top.gg to initiate login...")
-    await page.goto(vote_url, wait_until="networkidle")
+    await page.goto(vote_url, wait_until="load")
     await asyncio.sleep(3)
 
     login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
@@ -255,7 +257,7 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
     vote_url = f"https://top.gg/bot/{bot_id}/vote"
     print(f"  → Voting for bot {bot_id}...")
 
-    await page.goto(vote_url, wait_until="networkidle")
+    await page.goto(vote_url, wait_until="load")
     await asyncio.sleep(3)
     await screenshot(page, f"screenshots/vote_{bot_id}.png")
     dbg(f"Vote page URL: {page.url}")
@@ -265,7 +267,7 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
     text_lower = page_text.lower()
     if "must be logged in" in text_lower or "login to vote" in text_lower:
         dbg("Session not applied yet, reloading...")
-        await page.reload(wait_until="networkidle")
+        await page.reload(wait_until="load")
         await asyncio.sleep(3)
         page_text = await page.inner_text("body")
         text_lower = page_text.lower()
@@ -326,12 +328,34 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
     await vote_btn.click()
     await asyncio.sleep(5)
 
-    # Check result
+    await screenshot(page, f"screenshots/vote_{bot_id}_after_click.png")
+
+    # Check immediately for "Thanks for voting!" (appears right after successful vote)
+    page_text_after = await page.inner_text("body")
+    text_after_lower = page_text_after.lower()
+
+    if "thanks for voting" in text_after_lower:
+        print(f"  ✅ Successfully voted for {bot_id}")
+        await screenshot(page, f"screenshots/vote_{bot_id}_success.png")
+        return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
+
+    # Fallback: reload page and check server-side state
+    dbg("No immediate success text, reloading to verify...")
+    await page.reload(wait_until="load")
+    await asyncio.sleep(3)
     page_text_after = await page.inner_text("body")
     text_after_lower = page_text_after.lower()
     await screenshot(page, f"screenshots/vote_{bot_id}_after.png")
 
-    if any(kw in text_after_lower for kw in ["vote again in", "voted", "success", "thank"]):
+    # "You have already voted" / "You can vote again in about 12 hours" = success
+    if any(kw in text_after_lower for kw in [
+        "you have already voted",
+        "already voted",
+        "vote again in",
+        "can vote again",
+        "thanks for voting",
+        "thank you",
+    ]):
         print(f"  ✅ Successfully voted for {bot_id}")
         return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
     else:
@@ -343,19 +367,14 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
 # Per-account flow
 # ---------------------------------------------------------------------------
 
-async def process_account(
+async def _run_account(
     browser: Browser,
     token: str,
     bot_ids: list[str],
-    index: int,
-    total: int,
+    token_preview: str,
 ) -> list[dict]:
-    """Run full vote flow for one account."""
+    """Single attempt: login + vote for all bots. Raises on unexpected error."""
     results = []
-    prefix = f"[{index}/{total}]"
-    token_preview = token[:10] + "..." + token[-5:]
-    print(f"\n{'─' * 45}")
-    print(f"{prefix} Processing account...")
 
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
@@ -364,28 +383,54 @@ async def process_account(
     page = await context.new_page()
 
     try:
-        # Step 1: Discord OAuth login
         logged_in = await discord_oauth_login(page, token, bot_ids)
         if not logged_in:
             results.append({"bot_id": "all", "status": "auth_failed", "detail": "Discord OAuth login failed", "token_preview": token_preview})
             return results
 
-        # Step 2: Vote for each bot
         for i, bot_id in enumerate(bot_ids):
             result = await vote_for_bot(page, bot_id)
             result["token_preview"] = token_preview
             results.append(result)
             if i < len(bot_ids) - 1:
                 await asyncio.sleep(DELAY_BETWEEN_BOTS_SEC)
-
-    except Exception as exc:
-        print(f"{prefix} ❌ Unexpected error: {exc}")
-        results.append({"bot_id": "all", "status": "error", "detail": str(exc)[:200], "token_preview": token_preview})
-
     finally:
         await context.close()
 
     return results
+
+
+async def process_account(
+    browser: Browser,
+    token: str,
+    bot_ids: list[str],
+    index: int,
+    total: int,
+) -> list[dict]:
+    """Run full vote flow for one account, with up to MAX_RETRIES attempts."""
+    prefix = f"[{index}/{total}]"
+    token_preview = token[:10] + "..." + token[-5:]
+    print(f"\n{'─' * 45}")
+    print(f"{prefix} Processing account...")
+
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            if attempt > 1:
+                print(f"{prefix} ↺ Retry {attempt}/{MAX_RETRIES} (waiting {RETRY_DELAY_SEC}s)...")
+                await asyncio.sleep(RETRY_DELAY_SEC)
+            results = await _run_account(browser, token, bot_ids, token_preview)
+            # If we got any non-error status, consider it done
+            if results:
+                return results
+        except Exception as exc:
+            last_exc = exc
+            print(f"{prefix} ❌ Attempt {attempt} failed: {str(exc)[:120]}")
+
+    # All retries exhausted
+    err_msg = str(last_exc)[:200] if last_exc else "Unknown error after retries"
+    print(f"{prefix} ❌ All {MAX_RETRIES} attempts failed")
+    return [{"bot_id": "all", "status": "error", "detail": f"Failed after {MAX_RETRIES} retries: {err_msg}", "token_preview": token_preview}]
 
 
 # ---------------------------------------------------------------------------
