@@ -55,13 +55,52 @@ def dbg(msg: str) -> None:
 
 
 def screenshot(page: Page, path: str):
-    """Take screenshot only in DEBUG mode (non-blocking coroutine wrapper)."""
+    """Take screenshot only in DEBUG mode."""
     if DEBUG:
         return page.screenshot(path=path)
     # Return a no-op coroutine
     async def _noop():
         pass
     return _noop()
+
+
+async def error_screenshot(page: Page, path: str) -> str | None:
+    """Always take screenshot on errors, regardless of DEBUG mode. Returns path or None."""
+    try:
+        os.makedirs("screenshots", exist_ok=True)
+        await page.screenshot(path=path)
+        return path
+    except Exception:
+        return None
+
+
+def send_telegram_photo(path: str, caption: str = "") -> bool:
+    """Send a photo to Telegram. Returns True on success."""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return False
+    try:
+        with open(path, "rb") as f:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
+                data={"chat_id": TG_CHAT_ID, "caption": caption},
+                files={"photo": f},
+                timeout=30,
+            )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def notify_error_screenshot(bot_id: str, path: str, detail: str) -> None:
+    """Send error screenshot to Telegram if configured."""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        return
+    caption = f"❌ Vote failed for {bot_id}\n{detail}"
+    ok = send_telegram_photo(path, caption)
+    if ok:
+        print(f"  📸 Error screenshot sent to Telegram")
+    else:
+        print(f"  ⚠️  Could not send error screenshot to Telegram")
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +319,9 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
     # Check not logged in
     if "must be logged in" in text_lower or "login to vote" in text_lower:
         print(f"  ❌ Not logged into top.gg")
-        await screenshot(page, f"screenshots/vote_{bot_id}_not_logged_in.png")
+        err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_not_logged_in.png")
+        if err_path:
+            notify_error_screenshot(bot_id, err_path, "Not logged into top.gg")
         return {"bot_id": bot_id, "status": "error", "detail": "Not logged into top.gg"}
 
     # Check cooldown
@@ -306,7 +347,9 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
 
     if not vote_btn:
         print(f"  ❌ Vote button not found for {bot_id}")
-        await screenshot(page, f"screenshots/vote_{bot_id}_no_btn.png")
+        err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_no_btn.png")
+        if err_path:
+            notify_error_screenshot(bot_id, err_path, "Vote button not found")
         return {"bot_id": bot_id, "status": "error", "detail": "Vote button not found"}
 
     # Wait for Turnstile to auto-solve (button becomes enabled)
@@ -320,7 +363,9 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
 
     if is_disabled:
         print(f"  ❌ Vote button still disabled (Turnstile timeout)")
-        await screenshot(page, f"screenshots/vote_{bot_id}_disabled.png")
+        err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_disabled.png")
+        if err_path:
+            notify_error_screenshot(bot_id, err_path, "Turnstile solve timeout")
         return {"bot_id": bot_id, "status": "error", "detail": "Turnstile solve timeout"}
 
     # Click Vote
