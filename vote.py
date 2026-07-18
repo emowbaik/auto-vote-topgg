@@ -329,6 +329,20 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
         print(f"  ⏳ Already voted for {bot_id} (cooldown)")
         return {"bot_id": bot_id, "status": "cooldown", "detail": "Cooldown active"}
 
+    # Wait for ad countdown to finish ("You will be able to vote after this ad.")
+    ad_wait = 0
+    while ad_wait < 35:
+        body = await page.inner_text("body")
+        if "you will be able to vote after this ad" not in body.lower():
+            break
+        remaining = next(
+            (w for w in body.split() if w.isdigit()),
+            "?"
+        )
+        print(f"  → Ad playing, waiting... ({remaining}s remaining)")
+        await asyncio.sleep(3)
+        ad_wait += 3
+
     # Find Vote button
     vote_btn = None
     for selector in [
