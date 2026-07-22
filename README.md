@@ -82,6 +82,17 @@ The bot will automatically vote at:
 
 You can also trigger manually: **Actions → Top.gg Auto Vote → Run workflow**.
 
+### Fork & Scheduled Workflow Protection
+
+GitHub automatically disables scheduled (`cron`) workflows in public repositories after **60 days of inactivity**, including forks.
+
+To prevent this, the workflow includes a `workflow-keepalive` job that uses [`liskin/gh-workflow-keepalive@v1`](https://github.com/liskin/gh-workflow-keepalive). It refreshes the workflow schedule on every scheduled trigger.
+
+If your workflow is ever disabled:
+1. Go to **Actions → Top.gg Auto Vote → Enable workflow** (in the GitHub UI).
+2. Make a dummy commit (`git commit --allow-empty -m "keepalive"`) to reset the 60-day timer.
+3. Or add `workflow_dispatch:` to `.github/workflows/vote.yml` (already included) and trigger manually from time to time.
+
 ## Debugging
 
 To enable verbose logging and screenshots locally, set `DEBUG=1`:

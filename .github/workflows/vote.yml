@@ -52,3 +52,14 @@ jobs:
             fi
           done
           echo "✅ Cleanup done — only latest run kept."
+
+  # Prevent GitHub from disabling scheduled workflows due to 60-day inactivity
+  # Runs only on scheduled triggers (not manual dispatch)
+  # Source: https://github.com/liskin/gh-workflow-keepalive
+  workflow-keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: liskin/gh-workflow-keepalive@v1

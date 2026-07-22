@@ -387,7 +387,10 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
     await vote_btn.click()
     await asyncio.sleep(5)
 
-    await screenshot(page, f"screenshots/vote_{bot_id}_after_click.png")
+    # Keep both states for diagnosis if result remains uncertain.
+    after_click_path = await error_screenshot(
+        page, f"screenshots/vote_{bot_id}_after_click.png"
+    )
 
     # Check immediately for "Thanks for voting!" (appears right after successful vote)
     page_text_after = await page.inner_text("body")
@@ -404,7 +407,9 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
     await asyncio.sleep(3)
     page_text_after = await page.inner_text("body")
     text_after_lower = page_text_after.lower()
-    await screenshot(page, f"screenshots/vote_{bot_id}_after.png")
+    after_reload_path = await error_screenshot(
+        page, f"screenshots/vote_{bot_id}_after_reload.png"
+    )
 
     # "You have already voted" / "You can vote again in about 12 hours" = success
     if any(kw in text_after_lower for kw in [
@@ -417,9 +422,20 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
     ]):
         print(f"  ✅ Successfully voted for {bot_id}")
         return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
-    else:
-        print(f"  ⚠️  Vote clicked, result unclear for {bot_id}")
-        return {"bot_id": bot_id, "status": "uncertain", "detail": "Clicked, result unclear"}
+
+    print(f"  ⚠️  Vote clicked, result unclear for {bot_id}")
+    if after_click_path and after_reload_path:
+        notify_error_screenshot(
+            bot_id,
+            after_click_path,
+            "Result unclear — screenshot immediately after clicking Vote",
+        )
+        notify_error_screenshot(
+            bot_id,
+            after_reload_path,
+            "Result unclear — screenshot after page reload",
+        )
+    return {"bot_id": bot_id, "status": "uncertain", "detail": "Clicked, result unclear"}
 
 
 # ---------------------------------------------------------------------------
