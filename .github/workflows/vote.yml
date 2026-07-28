@@ -34,7 +34,8 @@ jobs:
           TOKENS:       ${{ secrets.TOKENS }}
           BOT_IDS:      ${{ secrets.BOT_IDS }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
+          TG_CHAT_ID:             ${{ secrets.TG_CHAT_ID }}
+          SEND_ERROR_SCREENSHOTS: ${{ secrets.SEND_ERROR_SCREENSHOTS }}
         run: python vote.py
 
       - name: Clear old workflow runs
@@ -46,12 +47,12 @@ jobs:
           count=0
           for run_id in $runs; do
             count=$((count + 1))
-            if [ $count -gt 1 ]; then
+            if [ $count -gt 10 ]; then
               echo "Deleting old run: $run_id"
               gh run delete $run_id || true
             fi
           done
-          echo "✅ Cleanup done — only latest run kept."
+          echo "✅ Cleanup done — latest 10 runs kept."
 
   # Prevent GitHub from disabling scheduled workflows due to 60-day inactivity
   # Runs only on scheduled triggers (not manual dispatch)
