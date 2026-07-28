@@ -360,35 +360,39 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
         print(f"  ⏳ Already voted for {bot_id} (cooldown)")
         return {"bot_id": bot_id, "status": "cooldown", "detail": "Cooldown active"}
 
-    # Wait for ad countdown to finish ("You will be able to vote after this ad.")
-    ad_wait = 0
-    while ad_wait < 35:
-        body = await page.inner_text("body")
-        if "you will be able to vote after this ad" not in body.lower():
-            break
-        remaining = next(
-            (w for w in body.split() if w.isdigit()),
-            "?"
-        )
-        print(f"  → Ad playing, waiting... ({remaining}s remaining)")
-        await asyncio.sleep(3)
-        ad_wait += 3
-
-    # Find Vote button
-    vote_btn = None
-    for selector in [
-        "button:has-text('Vote')",
-        ".chakra-button:has-text('Vote')",
-        "[data-testid='vote-button']",
-        "a[href*='vote']:has-text('Vote')",
-    ]:
+    # Wait until top.gg finishes the pre-vote ad.
+    ad_notice = page.get_by_text(
+        "You will be able to vote after this ad.", exact=True
+    )
+    if await ad_notice.is_visible():
+        print("  → Ad playing, waiting for completion...")
         try:
-            btn = page.locator(selector).first
+            await ad_notice.wait_for(state="hidden", timeout=TIMEOUT_VOTE_MS)
+        except Exception as exc:
+            dbg(f"Ad wait failed: {type(exc).__name__}")
+            print(f"  ❌ Ad countdown timeout for {bot_id}")
+            err_path = await error_screenshot(
+                page, f"screenshots/vote_{bot_id}_ad_timeout.png"
+            )
+            if err_path:
+                notify_error_screenshot(bot_id, err_path, "Ad countdown timeout")
+            return {"bot_id": bot_id, "status": "error", "detail": "Ad countdown timeout"}
+
+    # Prefer exact accessible name; keep narrow fallbacks for top.gg variants.
+    vote_btn = None
+    candidates = [
+        page.get_by_role("button", name="Vote", exact=True),
+        page.locator("[data-testid='vote-button']"),
+        page.locator("button.chakra-button").filter(has_text="Vote"),
+    ]
+    for candidate in candidates:
+        try:
+            btn = candidate.first
             if await btn.is_visible(timeout=3000):
                 vote_btn = btn
                 break
-        except Exception:
-            continue
+        except Exception as exc:
+            dbg(f"Vote selector fallback failed: {type(exc).__name__}")
 
     if not vote_btn:
         print(f"  ❌ Vote button not found for {bot_id}")
