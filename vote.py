@@ -93,7 +93,8 @@ def send_telegram_photo(path: str, caption: str = "") -> bool:
                 timeout=30,
             )
         return resp.status_code == 200
-    except Exception:
+    except Exception as exc:
+        dbg(f"Telegram photo failed: {type(exc).__name__}")
         return False
 
 
@@ -172,7 +173,8 @@ def send_notification(message: str) -> None:
         else:
             print(f"⚠️  Notification failed: {resp.status_code}")
     except Exception as exc:
-        print(f"⚠️  Notification exception: {exc}")
+        dbg(f"Telegram message failed: {type(exc).__name__}")
+        print("⚠️  Notification exception; enable DEBUG for error type.")
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +199,8 @@ async def _handle_discord_oauth(page: Page) -> bool:
                 await authorize_btn.click()
                 authorized = True
                 break
-        except Exception:
-            pass
+        except Exception as exc:
+            dbg(f"Authorize lookup failed: {type(exc).__name__}")
 
         # Scroll the inner scrollable container of the Discord OAuth dialog
         scrolled = await page.evaluate("""() => {
@@ -285,7 +287,8 @@ async def discord_oauth_login(page: Page, token: str, bot_ids: list[str]) -> boo
                 return True
             raise RuntimeError("Top.gg login state could not be verified")
     except Exception as exc:
-        print(f"  ❌ Could not trigger top.gg login: {exc}")
+        dbg(f"Top.gg login trigger failed: {type(exc).__name__}")
+        print("  ❌ Could not trigger top.gg login")
         await screenshot(page, "screenshots/03_login_failed.png")
         return False
 
@@ -315,7 +318,8 @@ async def discord_oauth_login(page: Page, token: str, bot_ids: list[str]) -> boo
         return True
     except Exception as exc:
         await screenshot(page, "screenshots/05_oauth_failed.png")
-        print(f"  ❌ OAuth redirect failed: {exc}")
+        dbg(f"OAuth redirect failed: {type(exc).__name__}")
+        print("  ❌ OAuth redirect failed")
         return False
 
 
@@ -535,7 +539,7 @@ async def process_account(
         try:
             attempt_results = await _run_account(browser, token, pending, account_id)
         except Exception as exc:
-            detail = f"{type(exc).__name__}: {str(exc)[:120]}"
+            detail = f"{type(exc).__name__}: transient browser failure"
             last_account_error = {
                 "bot_id": "all",
                 "status": "error",
