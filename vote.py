@@ -97,16 +97,16 @@ def send_telegram_photo(path: str, caption: str = "") -> bool:
         return False
 
 
-def notify_error_screenshot(bot_id: str, path: str, detail: str) -> None:
-    """Send error screenshot to Telegram if configured."""
+async def notify_error_screenshot(bot_id: str, path: str, detail: str) -> None:
+    """Send an error screenshot without blocking the Playwright event loop."""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
     caption = f"❌ Vote failed for {bot_id}\n{detail}"
-    ok = send_telegram_photo(path, caption)
+    ok = await asyncio.to_thread(send_telegram_photo, path, caption)
     if ok:
-        print(f"  📸 Error screenshot sent to Telegram")
+        print("  📸 Error screenshot sent to Telegram")
     else:
-        print(f"  ⚠️  Could not send error screenshot to Telegram")
+        print("  ⚠️  Could not send error screenshot to Telegram")
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +353,7 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
         print(f"  ❌ Not logged into top.gg")
         err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_not_logged_in.png")
         if err_path:
-            notify_error_screenshot(bot_id, err_path, "Not logged into top.gg")
+            await notify_error_screenshot(bot_id, err_path, "Not logged into top.gg")
         return {"bot_id": bot_id, "status": "error", "detail": "Not logged into top.gg"}
 
     # Check cooldown
@@ -376,7 +376,7 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
                 page, f"screenshots/vote_{bot_id}_ad_timeout.png"
             )
             if err_path:
-                notify_error_screenshot(bot_id, err_path, "Ad countdown timeout")
+                await notify_error_screenshot(bot_id, err_path, "Ad countdown timeout")
             return {"bot_id": bot_id, "status": "error", "detail": "Ad countdown timeout"}
 
     # Prefer exact accessible name; keep narrow fallbacks for top.gg variants.
@@ -399,7 +399,7 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
         print(f"  ❌ Vote button not found for {bot_id}")
         err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_no_btn.png")
         if err_path:
-            notify_error_screenshot(bot_id, err_path, "Vote button not found")
+            await notify_error_screenshot(bot_id, err_path, "Vote button not found")
         return {"bot_id": bot_id, "status": "error", "detail": "Vote button not found"}
 
     # Wait for Turnstile to auto-solve (button becomes enabled)
@@ -415,7 +415,7 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
         print(f"  ❌ Vote button still disabled (Turnstile timeout)")
         err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_disabled.png")
         if err_path:
-            notify_error_screenshot(bot_id, err_path, "Turnstile solve timeout")
+            await notify_error_screenshot(bot_id, err_path, "Turnstile solve timeout")
         return {"bot_id": bot_id, "status": "error", "detail": "Turnstile solve timeout"}
 
     # Click Vote
@@ -461,12 +461,12 @@ async def vote_for_bot(page: Page, bot_id: str) -> dict:
 
     print(f"  ⚠️  Vote clicked, result unclear for {bot_id}")
     if after_click_path and after_reload_path:
-        notify_error_screenshot(
+        await notify_error_screenshot(
             bot_id,
             after_click_path,
             "Result unclear — screenshot immediately after clicking Vote",
         )
-        notify_error_screenshot(
+        await notify_error_screenshot(
             bot_id,
             after_reload_path,
             "Result unclear — screenshot after page reload",
