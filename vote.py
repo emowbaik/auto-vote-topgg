@@ -41,6 +41,8 @@ DELAY_BETWEEN_BOTS_SEC = 3
 DELAY_BETWEEN_ACCOUNTS_SEC = 5
 MAX_RETRIES = 3
 RETRY_DELAY_SEC = 10
+FINAL_STATUSES = frozenset({"success", "cooldown"})
+TRANSIENT_STATUSES = frozenset({"error", "auth_failed", "uncertain"})
 
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
@@ -129,6 +131,20 @@ def load_bot_ids() -> list[str]:
 def account_fingerprint(token: str) -> str:
     """Return a short, non-reversible identifier for account reporting."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+def is_retryable_result(result: dict) -> bool:
+    """Return whether a result represents a transient failure."""
+    return result.get("status") in TRANSIENT_STATUSES
+
+
+def retryable_bot_ids(results: list[dict]) -> list[str]:
+    """Return only concrete bot IDs whose transient results need another attempt."""
+    return [
+        str(result["bot_id"])
+        for result in results
+        if is_retryable_result(result) and result.get("bot_id") not in {None, "all"}
+    ]
 
 
 # ---------------------------------------------------------------------------
