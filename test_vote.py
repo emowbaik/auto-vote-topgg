@@ -1,6 +1,6 @@
-﻿import os
+import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import vote
 
@@ -57,6 +57,40 @@ class RetryPolicyTests(unittest.TestCase):
             {"bot_id": "all", "status": "auth_failed"},
         ]
         self.assertEqual(vote.retryable_bot_ids(results), ["111", "333"])
+
+
+class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote._run_account", new_callable=AsyncMock)
+    async def test_only_transient_bots_are_retried(self, run_account, _sleep, _print):
+        run_account.side_effect = [
+            [
+                {"bot_id": "111", "status": "success", "detail": "ok", "account_id": "id"},
+                {"bot_id": "222", "status": "error", "detail": "temporary", "account_id": "id"},
+            ],
+            [{"bot_id": "222", "status": "cooldown", "detail": "done", "account_id": "id"}],
+        ]
+
+        results = await vote.process_account(object(), "token", ["111", "222"], 1, 1)
+
+        self.assertEqual([result["status"] for result in results], ["success", "cooldown"])
+        self.assertEqual(run_account.await_args_list[0].args[2], ["111", "222"])
+        self.assertEqual(run_account.await_args_list[1].args[2], ["222"])
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote._run_account", new_callable=AsyncMock)
+    async def test_auth_failure_retries_account(self, run_account, _sleep, _print):
+        run_account.side_effect = [
+            [{"bot_id": "all", "status": "auth_failed", "detail": "auth", "account_id": "id"}],
+            [{"bot_id": "111", "status": "success", "detail": "ok", "account_id": "id"}],
+        ]
+
+        results = await vote.process_account(object(), "token", ["111"], 1, 1)
+
+        self.assertEqual(results[0]["status"], "success")
+        self.assertEqual(run_account.await_count, 2)
 
 
 if __name__ == "__main__":

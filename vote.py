@@ -517,30 +517,54 @@ async def process_account(
     index: int,
     total: int,
 ) -> list[dict]:
-    """Run full vote flow for one account, with up to MAX_RETRIES attempts."""
+    """Retry authentication per account and transient failures per bot."""
     prefix = f"[{index}/{total}]"
     account_id = account_fingerprint(token)
+    pending = list(bot_ids)
+    results_by_bot: dict[str, dict] = {}
+    last_account_error: dict | None = None
     print(f"\n{'─' * 45}")
     print(f"{prefix} Processing account...")
 
-    last_exc: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            if attempt > 1:
-                print(f"{prefix} ↺ Retry {attempt}/{MAX_RETRIES} (waiting {RETRY_DELAY_SEC}s)...")
-                await asyncio.sleep(RETRY_DELAY_SEC)
-            results = await _run_account(browser, token, bot_ids, account_id)
-            # If we got any non-error status, consider it done
-            if results:
-                return results
-        except Exception as exc:
-            last_exc = exc
-            print(f"{prefix} ❌ Attempt {attempt} failed: {str(exc)[:120]}")
+        if attempt > 1:
+            print(f"{prefix} ↺ Retry {attempt}/{MAX_RETRIES} (waiting {RETRY_DELAY_SEC}s)...")
+            await asyncio.sleep(RETRY_DELAY_SEC)
 
-    # All retries exhausted
-    err_msg = str(last_exc)[:200] if last_exc else "Unknown error after retries"
-    print(f"{prefix} ❌ All {MAX_RETRIES} attempts failed")
-    return [{"bot_id": "all", "status": "error", "detail": f"Failed after {MAX_RETRIES} retries: {err_msg}", "account_id": account_id}]
+        try:
+            attempt_results = await _run_account(browser, token, pending, account_id)
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {str(exc)[:120]}"
+            last_account_error = {
+                "bot_id": "all",
+                "status": "error",
+                "detail": detail,
+                "account_id": account_id,
+            }
+            print(f"{prefix} ❌ Attempt {attempt} failed: {detail}")
+            continue
+
+        if attempt_results and attempt_results[0].get("bot_id") == "all":
+            last_account_error = attempt_results[0]
+            print(f"{prefix} ❌ Authentication attempt {attempt} failed")
+            continue
+
+        for result in attempt_results:
+            results_by_bot[str(result["bot_id"])] = result
+
+        pending = retryable_bot_ids(attempt_results)
+        if not pending:
+            return [results_by_bot[bot_id] for bot_id in bot_ids]
+
+    print(f"{prefix} ❌ All {MAX_RETRIES} attempts exhausted")
+    if results_by_bot:
+        return [results_by_bot[bot_id] for bot_id in bot_ids if bot_id in results_by_bot]
+    return [last_account_error or {
+        "bot_id": "all",
+        "status": "error",
+        "detail": f"Failed after {MAX_RETRIES} retries",
+        "account_id": account_id,
+    }]
 
 
 # ---------------------------------------------------------------------------
