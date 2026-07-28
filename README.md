@@ -9,8 +9,11 @@ Automated daily voting bot for [top.gg](https://top.gg) using Playwright (headle
 - 🤖 **Multi-bot** — vote for multiple bots per account
 - 🔐 **Secure OAuth** — lets top.gg generate its own OAuth URL (with `state` + PKCE), no hardcoded auth URLs
 - ⚡ **Turnstile auto-solve** — Cloudflare Turnstile resolves naturally in headless Chromium
-- 📨 **Telegram notifications** — per-account vote results sent to your chat
-- 🧹 **Auto-cleanup** — keeps only the latest GitHub Actions run log
+- 📨 **Telegram notifications** — per-account vote results sent with privacy-safe account fingerprints
+- 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating successful bots
+- 📸 **Opt-in diagnostics** — optionally sends error/uncertain screenshots to a private Telegram chat
+- 🧹 **Auto-cleanup** — keeps the latest 10 GitHub Actions runs for debugging
+- 📌 **Reproducible builds** — Python packages and GitHub Actions are pinned to tested immutable versions
 
 ## How It Works
 
@@ -59,6 +62,7 @@ Go to your repo **Settings → Secrets and variables → Actions → New reposit
 | `BOT_IDS` | ❌ | Bot ID(s) to vote for — one per line. Default: `830530156048285716` |
 | `TG_BOT_TOKEN` | ❌ | Telegram bot token (from [@BotFather](https://t.me/BotFather)) |
 | `TG_CHAT_ID` | ❌ | Telegram chat/user ID for vote result notifications |
+| `SEND_ERROR_SCREENSHOTS` | ❌ | Set to `1` to send error/uncertain screenshots to Telegram; default is disabled |
 
 **`TOKENS` multi-account example:**
 ```
@@ -105,7 +109,11 @@ set DEBUG=1 && python vote.py
 DEBUG=1 python vote.py
 ```
 
-Screenshots will be saved to `screenshots/` (gitignored). In normal mode (GitHub Actions), no screenshots or URLs are logged to protect your credentials.
+Screenshots will be saved to `screenshots/` (gitignored) when local `DEBUG=1` is enabled.
+
+For GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error and uncertain states will send screenshots to the configured Telegram chat. Keep that chat private: screenshots may contain Discord username, avatar, or top.gg account details. Without this secret, workflow screenshots remain disabled.
+
+Transient authentication/browser failures retry up to 3 times. In multi-bot runs, only bots with `error` or `uncertain` results retry; successful and cooldown bots are not repeated. Telegram reports identify accounts using a short SHA-256 fingerprint, never token fragments.
 
 ## Project Structure
 
@@ -122,7 +130,7 @@ auto-vote-topgg/
 ## Requirements
 
 - Python 3.11+
-- `playwright` + `requests` (see `requirements.txt`)
+- `playwright==1.61.0` + `requests==2.32.5` (pinned in `requirements.txt`)
 - Chromium (installed automatically by `playwright install chromium`)
 
 ## ⚠️ Disclaimer
