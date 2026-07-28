@@ -16,10 +16,13 @@ Environment variables (GitHub Secrets):
 """
 
 import asyncio
+import hashlib
 import os
 import sys
-import requests
 from datetime import datetime, timezone, timedelta
+from html import escape
+
+import requests
 from playwright.async_api import async_playwright, Page, Browser
 
 # ---------------------------------------------------------------------------
@@ -116,10 +119,16 @@ def load_tokens() -> list[str]:
 
 def load_bot_ids() -> list[str]:
     raw = os.environ.get("BOT_IDS", "").strip()
-    if not raw:
-        return DEFAULT_BOT_IDS
-    ids = [line.strip() for line in raw.splitlines() if line.strip()]
-    return ids if ids else DEFAULT_BOT_IDS
+    ids = [line.strip() for line in raw.splitlines() if line.strip()] if raw else DEFAULT_BOT_IDS
+    invalid = [bot_id for bot_id in ids if not (bot_id.isdigit() and 17 <= len(bot_id) <= 20)]
+    if invalid:
+        raise ValueError(f"Invalid BOT_IDS value: {invalid[0]!r}; expected a 17-20 digit Discord ID")
+    return ids
+
+
+def account_fingerprint(token: str) -> str:
+    """Return a short, non-reversible identifier for account reporting."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +455,7 @@ async def _run_account(
     browser: Browser,
     token: str,
     bot_ids: list[str],
-    token_preview: str,
+    account_id: str,
 ) -> list[dict]:
     """Single attempt: login + vote for all bots. Raises on unexpected error."""
     results = []
@@ -460,12 +469,12 @@ async def _run_account(
     try:
         logged_in = await discord_oauth_login(page, token, bot_ids)
         if not logged_in:
-            results.append({"bot_id": "all", "status": "auth_failed", "detail": "Discord OAuth login failed", "token_preview": token_preview})
+            results.append({"bot_id": "all", "status": "auth_failed", "detail": "Discord OAuth login failed", "account_id": account_id})
             return results
 
         for i, bot_id in enumerate(bot_ids):
             result = await vote_for_bot(page, bot_id)
-            result["token_preview"] = token_preview
+            result["account_id"] = account_id
             results.append(result)
             if i < len(bot_ids) - 1:
                 await asyncio.sleep(DELAY_BETWEEN_BOTS_SEC)
@@ -484,7 +493,7 @@ async def process_account(
 ) -> list[dict]:
     """Run full vote flow for one account, with up to MAX_RETRIES attempts."""
     prefix = f"[{index}/{total}]"
-    token_preview = token[:10] + "..." + token[-5:]
+    account_id = account_fingerprint(token)
     print(f"\n{'─' * 45}")
     print(f"{prefix} Processing account...")
 
@@ -494,7 +503,7 @@ async def process_account(
             if attempt > 1:
                 print(f"{prefix} ↺ Retry {attempt}/{MAX_RETRIES} (waiting {RETRY_DELAY_SEC}s)...")
                 await asyncio.sleep(RETRY_DELAY_SEC)
-            results = await _run_account(browser, token, bot_ids, token_preview)
+            results = await _run_account(browser, token, bot_ids, account_id)
             # If we got any non-error status, consider it done
             if results:
                 return results
@@ -505,7 +514,7 @@ async def process_account(
     # All retries exhausted
     err_msg = str(last_exc)[:200] if last_exc else "Unknown error after retries"
     print(f"{prefix} ❌ All {MAX_RETRIES} attempts failed")
-    return [{"bot_id": "all", "status": "error", "detail": f"Failed after {MAX_RETRIES} retries: {err_msg}", "token_preview": token_preview}]
+    return [{"bot_id": "all", "status": "error", "detail": f"Failed after {MAX_RETRIES} retries: {err_msg}", "account_id": account_id}]
 
 
 # ---------------------------------------------------------------------------
@@ -523,13 +532,13 @@ def build_notification(all_results: list[list[dict]], now: str) -> str:
         if not account_results:
             continue
 
-        token_preview = account_results[0].get("token_preview", "?")
-        lines.append(f"👤 <b>Account {token_preview}</b>")
+        account_id = escape(str(account_results[0].get("account_id", "?")))
+        lines.append(f"👤 <b>Account {account_id}</b>")
 
         for r in account_results:
-            bot_id = r.get("bot_id", "?")
+            bot_id = escape(str(r.get("bot_id", "?")))
             status = r.get("status", "?")
-            detail = r.get("detail", "")
+            detail = escape(str(r.get("detail", "")))
 
             icon = {"success": "✅", "cooldown": "⏳", "uncertain": "⚠️"}.get(status, "❌")
             lines.append(f"  {icon} {bot_id}: {detail}")
