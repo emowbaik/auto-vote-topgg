@@ -272,19 +272,25 @@ async def discord_oauth_login(page: Page, token: str, bot_ids: list[str]) -> boo
             async with page.expect_navigation(url="**discord.com/oauth2/authorize**", timeout=15000):
                 await login_btn.click()
         else:
-            # Check if already logged in
-            page_text = await page.inner_text("body")
-            if "must be logged in" not in page_text.lower():
+            page_text = (await page.inner_text("body")).lower()
+            authenticated = any(marker in page_text for marker in (
+                "logout",
+                "dashboard",
+                "you have already voted",
+                "you will be able to vote after this ad",
+            ))
+            if authenticated:
                 print("  ✅ Already logged into top.gg")
                 return True
-            raise Exception("Login button not visible")
+            raise RuntimeError("Top.gg login state could not be verified")
     except Exception as exc:
         print(f"  ❌ Could not trigger top.gg login: {exc}")
         await screenshot(page, "screenshots/03_login_failed.png")
         return False
 
     # Step 3: Handle Discord OAuth dialog
-    authorized = await _handle_discord_oauth(page)
+    if not await _handle_discord_oauth(page):
+        return False
 
     # Wait for redirect back to top.gg
     try:
