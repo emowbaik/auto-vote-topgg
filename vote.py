@@ -47,6 +47,7 @@ TRANSIENT_STATUSES = frozenset({"error", "auth_failed", "uncertain"})
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 DEBUG = os.environ.get("DEBUG", "").strip() == "1"
+SEND_ERROR_SCREENSHOTS = os.environ.get("SEND_ERROR_SCREENSHOTS", "").strip() == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -59,23 +60,23 @@ def dbg(msg: str) -> None:
         print(f"    [dbg] {msg}")
 
 
-def screenshot(page: Page, path: str):
-    """Take screenshot only in DEBUG mode."""
+async def screenshot(page: Page, path: str) -> None:
+    """Take a local screenshot only in DEBUG mode."""
     if DEBUG:
-        return page.screenshot(path=path)
-    # Return a no-op coroutine
-    async def _noop():
-        pass
-    return _noop()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        await page.screenshot(path=path)
 
 
 async def error_screenshot(page: Page, path: str) -> str | None:
-    """Always take screenshot on errors, regardless of DEBUG mode. Returns path or None."""
+    """Capture an error state only when explicitly enabled."""
+    if not SEND_ERROR_SCREENSHOTS:
+        return None
     try:
         os.makedirs("screenshots", exist_ok=True)
         await page.screenshot(path=path)
         return path
-    except Exception:
+    except Exception as exc:
+        dbg(f"Error screenshot failed: {type(exc).__name__}")
         return None
 
 
