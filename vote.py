@@ -40,6 +40,21 @@ def dbg(msg: str) -> None:
         print(f"    [dbg] {msg}")
 
 
+def safe_exception_detail(exc: Exception) -> str:
+    """Redact configured credentials before exposing a short diagnostic."""
+    detail = str(exc).replace("\n", " ").strip()
+    secrets = [
+        TG_BOT_TOKEN,
+        TG_CHAT_ID,
+        os.environ.get("TOPGG_COOKIES_JSON", ""),
+        *load_tokens(),
+    ]
+    for secret in secrets:
+        if secret:
+            detail = detail.replace(secret, "***")
+    return detail[:200] or "no detail"
+
+
 async def screenshot(tab: Any, path: str) -> None:
     if DEBUG:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -416,6 +431,12 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
     await asyncio.sleep(3)
     text = (await body_text(tab)).lower()
 
+    if "must be logged in" in text or "login to vote" in text:
+        dbg("top.gg session not applied yet; reloading once")
+        await tab.reload()
+        await asyncio.sleep(3)
+        text = (await body_text(tab)).lower()
+
     if "could not be found" in text or "404" in str(await evaluate(tab, "document.title")):
         return {"bot_id": bot_id, "status": "error", "detail": "Vote page 404"}
     if "must be logged in" in text or "login to vote" in text:
@@ -561,7 +582,9 @@ async def process_account(
             )
         except Exception as exc:
             if isinstance(exc, BrowserStartupError):
-                detail = f"Browser startup failed: {exc}"
+                detail = f"Browser startup failed: {safe_exception_detail(exc)}"
+            elif isinstance(exc, TypeError):
+                detail = f"TypeError: {safe_exception_detail(exc)}"
             else:
                 detail = f"{type(exc).__name__}: transient browser failure"
             last_account_error = {
