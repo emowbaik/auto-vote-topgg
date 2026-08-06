@@ -131,17 +131,17 @@ class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
 class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):
     @patch.object(vote, "SEND_ERROR_SCREENSHOTS", False)
     async def test_error_screenshot_is_disabled_by_default(self):
-        page = AsyncMock()
-        self.assertIsNone(await vote.error_screenshot(page, "screenshots/error.png"))
-        page.screenshot.assert_not_awaited()
+        tab = AsyncMock()
+        self.assertIsNone(await vote.error_screenshot(tab, "screenshots/error.png"))
+        tab.save_screenshot.assert_not_awaited()
 
     @patch.object(vote, "SEND_ERROR_SCREENSHOTS", True)
     async def test_error_screenshot_runs_when_opted_in(self):
-        page = AsyncMock()
+        tab = AsyncMock()
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "error.png")
-            self.assertEqual(await vote.error_screenshot(page, path), path)
-        page.screenshot.assert_awaited_once_with(path=path)
+            self.assertEqual(await vote.error_screenshot(tab, path), path)
+        tab.save_screenshot.assert_awaited_once_with(filename=path, format="png")
 
 
 if __name__ == "__main__":

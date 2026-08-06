@@ -1,43 +1,23 @@
 #!/usr/bin/env python3
-"""
-auto-vote-dcbot — Automated daily voting on top.gg via Playwright.
-
-Flow per account:
-  1. Inject Discord token → OAuth authorize → logged into top.gg
-  2. For each bot ID: navigate vote page → wait Turnstile → click Vote
-  3. Report results via Telegram
-
-Environment variables (GitHub Secrets):
-    TOKENS        — Newline-separated Discord user tokens
-    BOT_IDS       — Newline-separated Discord bot IDs (default: 830530156048285716)
-    TG_BOT_TOKEN  — (optional) Telegram bot token for notifications
-    TG_CHAT_ID    — (optional) Telegram chat ID
-    DEBUG         — (optional) Set to "1" to enable verbose URL logging & screenshots
-"""
+"""Automated top.gg voting via nodriver, cookie-first auth, and Discord OAuth fallback."""
 
 import asyncio
 import hashlib
 import json
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
+from typing import Any
 
+import nodriver as uc
 import requests
-from playwright.async_api import async_playwright, Page, Browser
-
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 
 WIB = timezone(timedelta(hours=7))
-
 DISCORD_LOGIN_URL = "https://discord.com/login"
-
 DEFAULT_BOT_IDS = ["830530156048285716"]
-
-TIMEOUT_OAUTH_MS = 20_000
-TIMEOUT_VOTE_MS = 30_000
+TIMEOUT_OAUTH_SEC = 25
+TIMEOUT_VOTE_SEC = 30
 DELAY_BETWEEN_BOTS_SEC = 3
 DELAY_BETWEEN_ACCOUNTS_SEC = 5
 MAX_RETRIES = 3
@@ -51,30 +31,23 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 SEND_ERROR_SCREENSHOTS = os.environ.get("SEND_ERROR_SCREENSHOTS", "").strip() == "1"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def dbg(msg: str) -> None:
-    """Print only when DEBUG=1."""
     if DEBUG:
         print(f"    [dbg] {msg}")
 
 
-async def screenshot(page: Page, path: str) -> None:
-    """Take a local screenshot only in DEBUG mode."""
+async def screenshot(tab: Any, path: str) -> None:
     if DEBUG:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        await page.screenshot(path=path)
+        await tab.save_screenshot(filename=path, format="png")
 
 
-async def error_screenshot(page: Page, path: str) -> str | None:
-    """Capture an error state only when explicitly enabled."""
+async def error_screenshot(tab: Any, path: str) -> str | None:
     if not SEND_ERROR_SCREENSHOTS:
         return None
     try:
         os.makedirs("screenshots", exist_ok=True)
-        await page.screenshot(path=path)
+        await tab.save_screenshot(filename=path, format="png")
         return path
     except Exception as exc:
         dbg(f"Error screenshot failed: {type(exc).__name__}")
@@ -82,44 +55,33 @@ async def error_screenshot(page: Page, path: str) -> str | None:
 
 
 def send_telegram_photo(path: str, caption: str = "") -> bool:
-    """Send a photo to Telegram. Returns True on success."""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return False
     try:
-        with open(path, "rb") as f:
-            resp = requests.post(
+        with open(path, "rb") as file:
+            response = requests.post(
                 f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
                 data={"chat_id": TG_CHAT_ID, "caption": caption},
-                files={"photo": f},
+                files={"photo": file},
                 timeout=30,
             )
-        return resp.status_code == 200
+        return response.status_code == 200
     except Exception as exc:
         dbg(f"Telegram photo failed: {type(exc).__name__}")
         return False
 
 
 async def notify_error_screenshot(bot_id: str, path: str, detail: str) -> None:
-    """Send an error screenshot without blocking the Playwright event loop."""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
     caption = f"❌ Vote failed for {bot_id}\n{detail}"
-    ok = await asyncio.to_thread(send_telegram_photo, path, caption)
-    if ok:
-        print("  📸 Error screenshot sent to Telegram")
-    else:
-        print("  ⚠️  Could not send error screenshot to Telegram")
+    sent = await asyncio.to_thread(send_telegram_photo, path, caption)
+    print("  📸 Error screenshot sent to Telegram" if sent else "  ⚠️  Could not send error screenshot to Telegram")
 
-
-# ---------------------------------------------------------------------------
-# Loaders
-# ---------------------------------------------------------------------------
 
 def load_tokens() -> list[str]:
     raw = os.environ.get("TOKENS", "").strip()
-    if not raw:
-        return []
-    return [line.strip() for line in raw.splitlines() if line.strip()]
+    return [line.strip() for line in raw.splitlines() if line.strip()] if raw else []
 
 
 def load_bot_ids() -> list[str]:
@@ -132,17 +94,14 @@ def load_bot_ids() -> list[str]:
 
 
 def account_fingerprint(token: str) -> str:
-    """Return a short, non-reversible identifier for account reporting."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
 def is_retryable_result(result: dict) -> bool:
-    """Return whether a result represents a transient failure."""
     return result.get("status") in TRANSIENT_STATUSES
 
 
 def retryable_bot_ids(results: list[dict]) -> list[str]:
-    """Return only concrete bot IDs whose transient results need another attempt."""
     return [
         str(result["bot_id"])
         for result in results
@@ -151,7 +110,6 @@ def retryable_bot_ids(results: list[dict]) -> list[str]:
 
 
 def _normalize_cookie(cookie: dict) -> dict:
-    """Convert browser-extension cookie JSON to CDP-compatible fields."""
     normalized = {
         "name": str(cookie["name"]),
         "value": str(cookie["value"]),
@@ -175,11 +133,9 @@ def _normalize_cookie(cookie: dict) -> dict:
 
 
 def load_topgg_cookies() -> list[list[dict]]:
-    """Load one top.gg Auth.js cookie JSON array per account line."""
     raw = os.environ.get("TOPGG_COOKIES_JSON", "")
     if not raw.strip():
         return []
-
     account_cookies = []
     for index, line in enumerate(raw.splitlines(), 1):
         line = line.strip()
@@ -201,380 +157,385 @@ def load_topgg_cookies() -> list[list[dict]]:
     return account_cookies
 
 
-# ---------------------------------------------------------------------------
-# Notification
-# ---------------------------------------------------------------------------
-
 def send_notification(message: str) -> None:
     print("\n" + "=" * 45)
     print(message)
     print("=" * 45)
-
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("ℹ️  TG_BOT_TOKEN / TG_CHAT_ID not set — skip notification.")
         return
-
     try:
-        resp = requests.post(
+        response = requests.post(
             f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
             json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "HTML"},
             timeout=10,
         )
-        if resp.status_code == 200:
-            print("📨 Telegram notification sent.")
-        else:
-            print(f"⚠️  Notification failed: {resp.status_code}")
+        print("📨 Telegram notification sent." if response.status_code == 200 else f"⚠️  Notification failed: {response.status_code}")
     except Exception as exc:
         dbg(f"Telegram message failed: {type(exc).__name__}")
         print("⚠️  Notification exception; enable DEBUG for error type.")
 
 
-# ---------------------------------------------------------------------------
-# Discord OAuth login
-# ---------------------------------------------------------------------------
-
-async def _handle_discord_oauth(page: Page) -> bool:
-    """Handle the Discord OAuth dialog (scroll past 'Keep Scrolling...' then click Authorize)."""
-    await asyncio.sleep(2)
-    await screenshot(page, "screenshots/03_oauth_page.png")
-    dbg(f"OAuth page URL: {page.url}")
-
-    # Discord OAuth: "Keep Scrolling..." guard — scroll inner dialog to reveal Authorize button
-    print("  → Handling Discord OAuth dialog...")
-    authorized = False
-    for attempt in range(12):
-        # Check if Authorize button is visible
-        authorize_btn = page.locator("button:has-text('Authorize'), button:has-text('Authorise')").first
-        try:
-            if await authorize_btn.is_visible(timeout=2000):
-                dbg(f"Authorize button found (attempt {attempt+1})")
-                await authorize_btn.click()
-                authorized = True
-                break
-        except Exception as exc:
-            dbg(f"Authorize lookup failed: {type(exc).__name__}")
-
-        # Scroll the inner scrollable container of the Discord OAuth dialog
-        scrolled = await page.evaluate("""() => {
-            const selectors = [
-                'div[class*="scroller"]',
-                'div[class*="scrollerBase"]',
-                'div[class*="overflow"]',
-                'div[class*="body"]',
-                'div[class*="content"]',
-            ];
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el && el.scrollHeight > el.clientHeight) {
-                    el.scrollTop += 300;
-                    return `scrolled ${sel} (scrollTop=${el.scrollTop})`;
-                }
-            }
-            window.scrollBy(0, 300);
-            return 'fallback window.scrollBy';
-        }""")
-        dbg(f"Scroll attempt {attempt+1}: {scrolled}")
-        await asyncio.sleep(1.5)
-
-    if not authorized:
-        print("  ❌ Could not find/click Authorize button")
-        await screenshot(page, "screenshots/04_no_auth_btn.png")
-    return authorized
+async def evaluate(tab: Any, expression: str) -> Any:
+    return await tab.evaluate(expression, await_promise=True, return_by_value=True)
 
 
-async def discord_oauth_login(page: Page, token: str, bot_ids: list[str]) -> bool:
-    """
-    Login flow:
-      1. Inject Discord token into discord.com
-      2. Navigate to top.gg vote page → click Login (top.gg generates OAuth URL with state + PKCE)
-      3. Handle Discord OAuth dialog → redirect back to top.gg with session set
-    Returns True if logged into top.gg successfully.
-    """
-    if DEBUG:
-        os.makedirs("screenshots", exist_ok=True)
+async def body_text(tab: Any) -> str:
+    return str(await evaluate(tab, "document.body ? document.body.innerText : ''") or "")
 
-    # Step 1: Inject token into Discord
-    print("  → Injecting Discord token...")
-    await page.goto(DISCORD_LOGIN_URL, wait_until="load")
-    await screenshot(page, "screenshots/01_discord_login.png")
 
-    await page.evaluate("""(token) => {
-        const iframe = document.body.appendChild(document.createElement('iframe'));
-        if (iframe.contentWindow) {
-            const ls = iframe.contentWindow.localStorage;
-            ls.setItem('token', `"${token}"`);
-            ls.setItem('tokens', JSON.stringify({"default": token}));
-        }
-        iframe.remove();
-    }""", token)
+async def current_url(tab: Any) -> str:
+    return str(await evaluate(tab, "location.href") or "")
 
-    await page.reload(wait_until="load")
-    await asyncio.sleep(3)
-    await screenshot(page, "screenshots/02_after_reload.png")
-    dbg(f"After token inject: {page.url}")
 
-    # Step 2: Navigate to top.gg vote page and click Login
-    # top.gg generates OAuth URL with proper state + PKCE parameters
-    first_bot = bot_ids[0] if bot_ids else "830530156048285716"
-    vote_url = f"https://top.gg/bot/{first_bot}/vote"
-    print("  → Navigating to top.gg to initiate login...")
-    await page.goto(vote_url, wait_until="load")
-    await asyncio.sleep(3)
+async def wait_for_url(tab: Any, needle: str, timeout: int) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if needle in await current_url(tab):
+            return True
+        await asyncio.sleep(1)
+    return False
 
-    login_btn = page.locator("a:has-text('Login'), button:has-text('Login')").first
+
+async def _mark_exact_element(tab: Any, selector: str, texts: list[str], marker: str) -> bool:
+    script = f"""(() => {{
+        const wanted = {json.dumps(texts)};
+        const nodes = [...document.querySelectorAll({json.dumps(selector)})];
+        const element = nodes.find(node => wanted.includes((node.textContent || '').trim()));
+        if (!element) return false;
+        element.setAttribute({json.dumps(marker)}, '1');
+        return true;
+    }})()"""
+    return bool(await evaluate(tab, script))
+
+
+async def _click_marked(tab: Any, marker: str) -> bool:
     try:
-        if await login_btn.is_visible(timeout=5000):
-            async with page.expect_navigation(url="**discord.com/oauth2/authorize**", timeout=15000):
-                await login_btn.click()
-        else:
-            page_text = (await page.inner_text("body")).lower()
-            authenticated = any(marker in page_text for marker in (
-                "logout",
-                "dashboard",
-                "you have already voted",
-                "you will be able to vote after this ad",
-            ))
-            if authenticated:
-                print("  ✅ Already logged into top.gg")
-                return True
-            raise RuntimeError("Top.gg login state could not be verified")
-    except Exception as exc:
-        dbg(f"Top.gg login trigger failed: {type(exc).__name__}")
-        print("  ❌ Could not trigger top.gg login")
-        await screenshot(page, "screenshots/03_login_failed.png")
-        return False
-
-    # Step 3: Handle Discord OAuth dialog
-    if not await _handle_discord_oauth(page):
-        return False
-
-    # Wait for redirect back to top.gg
-    try:
-        await page.wait_for_url("**/top.gg/**", timeout=TIMEOUT_OAUTH_MS)
-        final_url = page.url
-        dbg(f"Redirected to: {final_url}")
-
-        # If landed on callback URL, wait a moment for final redirect
-        if "callback" in final_url:
-            await asyncio.sleep(3)
-            final_url = page.url
-
-        page_text = await page.inner_text("body")
-        if "404" in page_text or "could not be found" in page_text.lower():
-            print("  ❌ top.gg callback returned 404")
-            await screenshot(page, "screenshots/05_oauth_404.png")
-            return False
-
-        print("  ✅ Logged into top.gg")
-        await screenshot(page, "screenshots/05_topgg_logged_in.png")
+        element = await tab.select(f'[{marker}="1"]', timeout=2)
+        await element.scroll_into_view()
+        await element.click()
         return True
     except Exception as exc:
-        await screenshot(page, "screenshots/05_oauth_failed.png")
-        dbg(f"OAuth redirect failed: {type(exc).__name__}")
-        print("  ❌ OAuth redirect failed")
+        dbg(f"Marked click failed: {type(exc).__name__}")
         return False
 
 
-# ---------------------------------------------------------------------------
-# Vote for a single bot
-# ---------------------------------------------------------------------------
+async def inject_topgg_cookies(browser: Any, cookies: list[dict]) -> None:
+    params = []
+    for cookie in cookies:
+        same_site = uc.cdp.network.CookieSameSite(cookie["sameSite"])
+        expires = uc.cdp.network.TimeSinceEpoch(cookie["expires"]) if cookie.get("expires") else None
+        params.append(uc.cdp.network.CookieParam(
+            name=cookie["name"],
+            value=cookie["value"],
+            domain=cookie["domain"],
+            path=cookie["path"],
+            secure=cookie["secure"],
+            http_only=cookie["httpOnly"],
+            same_site=same_site,
+            expires=expires,
+        ))
+    if params:
+        await browser.cookies.set_all(params)
 
-async def vote_for_bot(page: Page, bot_id: str) -> dict:
-    """Navigate to vote page and click Vote. Returns result dict."""
-    vote_url = f"https://top.gg/bot/{bot_id}/vote"
-    print(f"  → Voting for bot {bot_id}...")
 
-    await page.goto(vote_url, wait_until="load")
+async def is_topgg_authenticated(tab: Any) -> bool:
+    result = await evaluate(tab, """(async () => {
+        try {
+            const response = await fetch('/api/auth/session', {credentials: 'include'});
+            if (!response.ok) return false;
+            const session = await response.json();
+            return Boolean(session && session.user);
+        } catch (_) {
+            return false;
+        }
+    })()""")
+    return bool(result)
+
+
+async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) -> bool:
+    if not cookies:
+        return False
+    print("  → Injecting top.gg Auth.js cookies...")
+    await inject_topgg_cookies(tab.browser, cookies)
+    await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(3)
-    await screenshot(page, f"screenshots/vote_{bot_id}.png")
-    dbg(f"Vote page URL: {page.url}")
+    authenticated = await is_topgg_authenticated(tab)
+    print("  ✅ Authenticated via top.gg cookies" if authenticated else "  ⚠️  Cookie session invalid or expired")
+    return authenticated
 
-    # If still showing "not logged in", reload once (session cookie race condition)
-    page_text = await page.inner_text("body")
-    text_lower = page_text.lower()
-    if "must be logged in" in text_lower or "login to vote" in text_lower:
-        dbg("Session not applied yet, reloading...")
-        await page.reload(wait_until="load")
+
+async def _handle_discord_oauth(tab: Any) -> bool:
+    print("  → Handling Discord OAuth dialog...")
+    for attempt in range(12):
+        if "top.gg" in await current_url(tab):
+            return True
+        marker = "data-auto-oauth"
+        if await _mark_exact_element(tab, "button", ["Authorize", "Authorise"], marker):
+            if await _click_marked(tab, marker):
+                dbg(f"Authorize clicked (attempt {attempt + 1})")
+                return True
+        await evaluate(tab, """(() => {
+            const nodes = [...document.querySelectorAll('div')]
+                .filter(el => el.scrollHeight > el.clientHeight);
+            const target = nodes.sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+            if (target) target.scrollTop += 400;
+            else window.scrollBy(0, 400);
+        })()""")
+        await asyncio.sleep(1.5)
+    return False
+
+
+async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> bool:
+    print("  → Injecting Discord token...")
+    await tab.get(DISCORD_LOGIN_URL)
+    await asyncio.sleep(2)
+    await evaluate(tab, f"""(() => {{
+        const token = {json.dumps(token)};
+        const frame = document.body.appendChild(document.createElement('iframe'));
+        if (frame.contentWindow) {{
+            frame.contentWindow.localStorage.setItem('token', JSON.stringify(token));
+            frame.contentWindow.localStorage.setItem('tokens', JSON.stringify({{"default": token}}));
+        }}
+        frame.remove();
+    }})()""")
+    await tab.reload()
+    await asyncio.sleep(3)
+
+    print("  → Navigating to top.gg to initiate login...")
+    await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
+    await asyncio.sleep(3)
+    if await is_topgg_authenticated(tab):
+        print("  ✅ Already logged into top.gg")
+        return True
+
+    marker = "data-auto-login"
+    if not await _mark_exact_element(tab, "a,button", ["Login"], marker):
+        print("  ❌ Could not find top.gg Login button")
+        return False
+    if not await _click_marked(tab, marker):
+        print("  ❌ Could not click top.gg Login button")
+        return False
+    if not await wait_for_url(tab, "discord.com/oauth2/authorize", TIMEOUT_OAUTH_SEC):
+        print("  ❌ Discord OAuth page did not open")
+        return False
+    if not await _handle_discord_oauth(tab):
+        print("  ❌ Could not authorize top.gg")
+        return False
+    if not await wait_for_url(tab, "top.gg", TIMEOUT_OAUTH_SEC):
+        print("  ❌ OAuth redirect failed")
+        return False
+    await asyncio.sleep(3)
+    authenticated = await is_topgg_authenticated(tab)
+    print("  ✅ Logged into top.gg" if authenticated else "  ❌ top.gg session not established")
+    return authenticated
+
+
+async def is_turnstile_present(tab: Any) -> bool:
+    return bool(await evaluate(tab, """(() => {
+        const body = document.body ? document.body.innerText.toLowerCase() : '';
+        if (body.includes('verify you are human') ||
+            body.includes('please solve the captcha to continue') ||
+            body.includes('let us know you are human')) return true;
+        if (document.querySelector('iframe[src*="challenges.cloudflare.com"]')) return true;
+        if (document.querySelector('input[name="cf-turnstile-response"]')) return true;
+        return Boolean(document.querySelector('.cf-turnstile'));
+    })()"""))
+
+
+async def is_turnstile_solved(tab: Any) -> bool:
+    return bool(await evaluate(tab, """(() => {
+        const fields = document.querySelectorAll(
+            'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
+        );
+        return [...fields].some(field => field.value && field.value.length > 10);
+    })()"""))
+
+
+async def solve_turnstile(tab: Any) -> bool:
+    if await is_turnstile_solved(tab):
+        return True
+    if not await is_turnstile_present(tab):
+        return True
+    print("  → Turnstile detected, attempting verification...")
+    try:
+        await tab.verify_cf()
+    except Exception as exc:
+        dbg(f"verify_cf failed: {type(exc).__name__}")
+    deadline = asyncio.get_running_loop().time() + TIMEOUT_VOTE_SEC
+    while asyncio.get_running_loop().time() < deadline:
+        if await is_turnstile_solved(tab) or not await is_turnstile_present(tab):
+            return True
+        await asyncio.sleep(2)
+    return False
+
+
+async def captcha_result(tab: Any, bot_id: str, detail: str) -> dict:
+    print(f"  🔒 Interactive CAPTCHA required for {bot_id}")
+    path = await error_screenshot(tab, f"screenshots/vote_{bot_id}_captcha.png")
+    if path:
+        await notify_error_screenshot(bot_id, path, detail)
+    return {"bot_id": bot_id, "status": "captcha_required", "detail": detail}
+
+
+async def wait_for_ad(tab: Any, bot_id: str) -> dict | None:
+    deadline = asyncio.get_running_loop().time() + TIMEOUT_VOTE_SEC
+    while asyncio.get_running_loop().time() < deadline:
+        text = (await body_text(tab)).lower()
+        if "you will be able to vote after this ad" not in text:
+            return None
+        print("  → Ad playing, waiting for completion...")
         await asyncio.sleep(3)
-        page_text = await page.inner_text("body")
-        text_lower = page_text.lower()
+    path = await error_screenshot(tab, f"screenshots/vote_{bot_id}_ad_timeout.png")
+    if path:
+        await notify_error_screenshot(bot_id, path, "Ad countdown timeout")
+    return {"bot_id": bot_id, "status": "error", "detail": "Ad countdown timeout"}
 
-    # Check 404
-    if "404" in await page.title() or "could not be found" in page_text.lower():
-        print(f"  ❌ Vote page 404 for {bot_id}")
+
+async def mark_vote_button(tab: Any) -> dict:
+    return dict(await evaluate(tab, """(() => {
+        document.querySelectorAll('[data-auto-vote]').forEach(el => el.removeAttribute('data-auto-vote'));
+        const button = [...document.querySelectorAll('button')]
+            .find(el => (el.textContent || '').trim() === 'Vote');
+        if (!button) return {found: false, disabled: true};
+        button.setAttribute('data-auto-vote', '1');
+        return {
+            found: true,
+            disabled: Boolean(button.disabled || button.getAttribute('aria-disabled') === 'true')
+        };
+    })()""") or {})
+
+
+async def vote_for_bot(tab: Any, bot_id: str) -> dict:
+    print(f"  → Voting for bot {bot_id}...")
+    await tab.get(f"https://top.gg/bot/{bot_id}/vote")
+    await asyncio.sleep(3)
+    text = (await body_text(tab)).lower()
+
+    if "could not be found" in text or "404" in str(await evaluate(tab, "document.title")):
         return {"bot_id": bot_id, "status": "error", "detail": "Vote page 404"}
-
-    # Check not logged in
-    if "must be logged in" in text_lower or "login to vote" in text_lower:
-        print(f"  ❌ Not logged into top.gg")
-        err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_not_logged_in.png")
-        if err_path:
-            await notify_error_screenshot(bot_id, err_path, "Not logged into top.gg")
-        return {"bot_id": bot_id, "status": "error", "detail": "Not logged into top.gg"}
-
-    # Check cooldown
-    if any(kw in text_lower for kw in ["vote again in", "already voted", "come back", "cooldown"]):
+    if "must be logged in" in text or "login to vote" in text:
+        return {"bot_id": bot_id, "status": "auth_failed", "detail": "Not logged into top.gg"}
+    if any(marker in text for marker in ("vote again in", "already voted", "come back", "cooldown")):
         print(f"  ⏳ Already voted for {bot_id} (cooldown)")
         return {"bot_id": bot_id, "status": "cooldown", "detail": "Cooldown active"}
 
-    # Wait until top.gg finishes the pre-vote ad.
-    ad_notice = page.get_by_text(
-        "You will be able to vote after this ad.", exact=True
-    )
-    if await ad_notice.is_visible():
-        print("  → Ad playing, waiting for completion...")
-        try:
-            await ad_notice.wait_for(state="hidden", timeout=TIMEOUT_VOTE_MS)
-        except Exception as exc:
-            dbg(f"Ad wait failed: {type(exc).__name__}")
-            print(f"  ❌ Ad countdown timeout for {bot_id}")
-            err_path = await error_screenshot(
-                page, f"screenshots/vote_{bot_id}_ad_timeout.png"
-            )
-            if err_path:
-                await notify_error_screenshot(bot_id, err_path, "Ad countdown timeout")
-            return {"bot_id": bot_id, "status": "error", "detail": "Ad countdown timeout"}
+    if await is_turnstile_present(tab) and not await solve_turnstile(tab):
+        return await captcha_result(tab, bot_id, "Interactive CAPTCHA requires manual completion")
 
-    # Prefer exact accessible name; keep narrow fallbacks for top.gg variants.
-    vote_btn = None
-    candidates = [
-        page.get_by_role("button", name="Vote", exact=True),
-        page.locator("[data-testid='vote-button']"),
-        page.locator("button.chakra-button").filter(has_text="Vote"),
-    ]
-    for candidate in candidates:
-        try:
-            btn = candidate.first
-            if await btn.is_visible(timeout=3000):
-                vote_btn = btn
-                break
-        except Exception as exc:
-            dbg(f"Vote selector fallback failed: {type(exc).__name__}")
+    ad_error = await wait_for_ad(tab, bot_id)
+    if ad_error:
+        return ad_error
 
-    if not vote_btn:
-        print(f"  ❌ Vote button not found for {bot_id}")
-        err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_no_btn.png")
-        if err_path:
-            await notify_error_screenshot(bot_id, err_path, "Vote button not found")
-        return {"bot_id": bot_id, "status": "error", "detail": "Vote button not found"}
+    if await is_turnstile_present(tab) and not await solve_turnstile(tab):
+        return await captcha_result(tab, bot_id, "Interactive CAPTCHA requires manual completion")
 
-    # Wait for Turnstile to auto-solve (button becomes enabled)
-    print("  → Waiting for Turnstile captcha...")
-    is_disabled = await vote_btn.is_disabled()
-    retries = 0
-    while is_disabled and retries < 15:
+    deadline = asyncio.get_running_loop().time() + TIMEOUT_VOTE_SEC
+    state = {}
+    while asyncio.get_running_loop().time() < deadline:
+        state = await mark_vote_button(tab)
+        if state.get("found") and not state.get("disabled"):
+            break
+        if await is_turnstile_present(tab) and not await solve_turnstile(tab):
+            return await captcha_result(tab, bot_id, "Interactive CAPTCHA requires manual completion")
         await asyncio.sleep(2)
-        is_disabled = await vote_btn.is_disabled()
-        retries += 1
+    else:
+        path = await error_screenshot(tab, f"screenshots/vote_{bot_id}_no_btn.png")
+        if path:
+            await notify_error_screenshot(bot_id, path, "Vote button unavailable")
+        detail = "Vote button disabled" if state.get("found") else "Vote button not found"
+        return {"bot_id": bot_id, "status": "error", "detail": detail}
 
-    if is_disabled:
-        print(f"  ❌ Vote button still disabled (Turnstile timeout)")
-        err_path = await error_screenshot(page, f"screenshots/vote_{bot_id}_disabled.png")
-        if err_path:
-            await notify_error_screenshot(bot_id, err_path, "Turnstile solve timeout")
-        return {"bot_id": bot_id, "status": "error", "detail": "Turnstile solve timeout"}
-
-    # Click Vote
     print("  → Clicking Vote...")
-    await vote_btn.click()
+    if not await _click_marked(tab, "data-auto-vote"):
+        return {"bot_id": bot_id, "status": "error", "detail": "Vote button click failed"}
     await asyncio.sleep(5)
 
-    # Keep both states for diagnosis if result remains uncertain.
-    after_click_path = await error_screenshot(
-        page, f"screenshots/vote_{bot_id}_after_click.png"
-    )
-
-    # Check immediately for "Thanks for voting!" (appears right after successful vote)
-    page_text_after = await page.inner_text("body")
-    text_after_lower = page_text_after.lower()
-
-    if "thanks for voting" in text_after_lower:
+    text = (await body_text(tab)).lower()
+    if "thanks for voting" in text:
         print(f"  ✅ Successfully voted for {bot_id}")
-        await screenshot(page, f"screenshots/vote_{bot_id}_success.png")
         return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
+    if await is_turnstile_present(tab) and not await is_turnstile_solved(tab):
+        return await captcha_result(tab, bot_id, "CAPTCHA appeared after clicking Vote")
 
-    # Fallback: reload page and check server-side state
-    dbg("No immediate success text, reloading to verify...")
-    await page.reload(wait_until="load")
+    await tab.reload()
     await asyncio.sleep(3)
-    page_text_after = await page.inner_text("body")
-    text_after_lower = page_text_after.lower()
-    after_reload_path = await error_screenshot(
-        page, f"screenshots/vote_{bot_id}_after_reload.png"
-    )
-
-    # "You have already voted" / "You can vote again in about 12 hours" = success
-    if any(kw in text_after_lower for kw in [
-        "you have already voted",
-        "already voted",
-        "vote again in",
-        "can vote again",
-        "thanks for voting",
-        "thank you",
-    ]):
+    text = (await body_text(tab)).lower()
+    if any(marker in text for marker in (
+        "you have already voted", "already voted", "vote again in",
+        "can vote again", "thanks for voting", "thank you",
+    )):
         print(f"  ✅ Successfully voted for {bot_id}")
         return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
+    if await is_turnstile_present(tab) and not await is_turnstile_solved(tab):
+        return await captcha_result(tab, bot_id, "CAPTCHA present after vote verification")
 
-    print(f"  ⚠️  Vote clicked, result unclear for {bot_id}")
-    if after_click_path and after_reload_path:
-        await notify_error_screenshot(
-            bot_id,
-            after_click_path,
-            "Result unclear — screenshot immediately after clicking Vote",
-        )
-        await notify_error_screenshot(
-            bot_id,
-            after_reload_path,
-            "Result unclear — screenshot after page reload",
-        )
+    path = await error_screenshot(tab, f"screenshots/vote_{bot_id}_uncertain.png")
+    if path:
+        await notify_error_screenshot(bot_id, path, "Vote result unclear")
     return {"bot_id": bot_id, "status": "uncertain", "detail": "Clicked, result unclear"}
 
 
-# ---------------------------------------------------------------------------
-# Per-account flow
-# ---------------------------------------------------------------------------
+async def start_browser() -> Any:
+    return await uc.start(
+        headless=False,
+        sandbox=False,
+        browser_args=[
+            "--window-size=1280,720",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    )
+
 
 async def _run_account(
-    browser: Browser,
+    _browser: Any,
     token: str,
     bot_ids: list[str],
     account_id: str,
+    account_cookies: list[dict] | None = None,
 ) -> list[dict]:
-    """Single attempt: login + vote for all bots. Raises on unexpected error."""
+    browser = await start_browser()
+    tab = await browser.get("about:blank")
     results = []
-
-    context = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 720},
-    )
-    page = await context.new_page()
-
     try:
-        logged_in = await discord_oauth_login(page, token, bot_ids)
-        if not logged_in:
-            results.append({"bot_id": "all", "status": "auth_failed", "detail": "Discord OAuth login failed", "account_id": account_id})
-            return results
+        authenticated = False
+        if account_cookies:
+            authenticated = await login_with_cookies(tab, account_cookies, bot_ids)
+            if not authenticated:
+                print("  → Cookie auth failed, falling back to Discord OAuth...")
+                await browser.cookies.clear()
+        if not authenticated:
+            authenticated = await discord_oauth_login(tab, token, bot_ids)
+        if not authenticated:
+            return [{
+                "bot_id": "all",
+                "status": "auth_failed",
+                "detail": "Top.gg authentication failed",
+                "account_id": account_id,
+            }]
 
-        for i, bot_id in enumerate(bot_ids):
-            result = await vote_for_bot(page, bot_id)
+        for position, bot_id in enumerate(bot_ids):
+            result = await vote_for_bot(tab, bot_id)
             result["account_id"] = account_id
             results.append(result)
-            if i < len(bot_ids) - 1:
+            if position < len(bot_ids) - 1:
                 await asyncio.sleep(DELAY_BETWEEN_BOTS_SEC)
+        return results
     finally:
-        await context.close()
-
-    return results
+        browser.stop()
+        await asyncio.sleep(1)
 
 
 async def process_account(
-    browser: Browser,
+    browser: Any,
     token: str,
     bot_ids: list[str],
     index: int,
     total: int,
+    account_cookies: list[dict] | None = None,
 ) -> list[dict]:
-    """Retry authentication per account and transient failures per bot."""
     prefix = f"[{index}/{total}]"
     account_id = account_fingerprint(token)
     pending = list(bot_ids)
@@ -587,17 +548,17 @@ async def process_account(
         if attempt > 1:
             print(f"{prefix} ↺ Retry {attempt}/{MAX_RETRIES} (waiting {RETRY_DELAY_SEC}s)...")
             await asyncio.sleep(RETRY_DELAY_SEC)
-
         try:
-            attempt_results = await _run_account(browser, token, pending, account_id)
+            attempt_results = await _run_account(
+                browser, token, pending, account_id, account_cookies
+            )
         except Exception as exc:
             detail = f"{type(exc).__name__}: transient browser failure"
             last_account_error = {
-                "bot_id": "all",
-                "status": "error",
-                "detail": detail,
-                "account_id": account_id,
+                "bot_id": "all", "status": "error",
+                "detail": detail, "account_id": account_id,
             }
+            dbg(f"Account attempt failed: {type(exc).__name__}")
             print(f"{prefix} ❌ Attempt {attempt} failed: {detail}")
             continue
 
@@ -605,10 +566,8 @@ async def process_account(
             last_account_error = attempt_results[0]
             print(f"{prefix} ❌ Authentication attempt {attempt} failed")
             continue
-
         for result in attempt_results:
             results_by_bot[str(result["bot_id"])] = result
-
         pending = retryable_bot_ids(attempt_results)
         if not pending:
             return [results_by_bot[bot_id] for bot_id in bot_ids]
@@ -617,100 +576,59 @@ async def process_account(
     if results_by_bot:
         return [results_by_bot[bot_id] for bot_id in bot_ids if bot_id in results_by_bot]
     return [last_account_error or {
-        "bot_id": "all",
-        "status": "error",
-        "detail": f"Failed after {MAX_RETRIES} retries",
-        "account_id": account_id,
+        "bot_id": "all", "status": "error",
+        "detail": f"Failed after {MAX_RETRIES} retries", "account_id": account_id,
     }]
 
 
-# ---------------------------------------------------------------------------
-# Build notification
-# ---------------------------------------------------------------------------
-
 def build_notification(all_results: list[list[dict]], now: str) -> str:
-    lines = [
-        "🗳️ <b>Top.gg Auto Vote Report</b>",
-        f"⏱️ {now}",
-        "",
-    ]
-
+    lines = ["🗳️ <b>Top.gg Auto Vote Report</b>", f"⏱️ {now}", ""]
     for account_results in all_results:
         if not account_results:
             continue
-
         account_id = escape(str(account_results[0].get("account_id", "?")))
         lines.append(f"👤 <b>Account {account_id}</b>")
-
-        for r in account_results:
-            bot_id = escape(str(r.get("bot_id", "?")))
-            status = r.get("status", "?")
-            detail = escape(str(r.get("detail", "")))
-
+        for result in account_results:
+            bot_id = escape(str(result.get("bot_id", "?")))
+            status = result.get("status", "?")
+            detail = escape(str(result.get("detail", "")))
             icon = {
-                "success": "✅",
-                "cooldown": "⏳",
-                "uncertain": "⚠️",
+                "success": "✅", "cooldown": "⏳", "uncertain": "⚠️",
                 "captcha_required": "🔒",
             }.get(status, "❌")
             lines.append(f"  {icon} {bot_id}: {detail}")
-
         lines.append("")
-
     return "\n".join(lines).strip()
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 async def main() -> None:
     tokens = load_tokens()
     if not tokens:
-        print(
-            "❌ No tokens found.\n"
-            "   Set TOKENS secret (one Discord user token per line)."
-        )
+        print("❌ No tokens found.\n   Set TOKENS secret (one Discord user token per line).")
         sys.exit(1)
 
     bot_ids = load_bot_ids()
+    all_cookies = load_topgg_cookies()
     now = datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB")
     total = len(tokens)
-
     print("🚀 auto-vote-dcbot starting")
     print(f"   Tokens  : {total}")
+    print(f"   Cookies : {sum(bool(cookies) for cookies in all_cookies)}/{total} account(s)")
     print(f"   Bots    : {len(bot_ids)}")
     print(f"   Time    : {now}")
-    if DEBUG:
-        print("   Mode    : DEBUG (screenshots enabled)")
 
-    all_results: list[list[dict]] = []
+    all_results = []
+    for index, token in enumerate(tokens, 1):
+        cookies = all_cookies[index - 1] if index <= len(all_cookies) else []
+        results = await process_account(None, token, bot_ids, index, total, cookies)
+        all_results.append(results)
+        if index < total:
+            await asyncio.sleep(DELAY_BETWEEN_ACCOUNTS_SEC)
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-
-        for i, token in enumerate(tokens, 1):
-            results = await process_account(browser, token, bot_ids, i, total)
-            all_results.append(results)
-            if i < total:
-                await asyncio.sleep(DELAY_BETWEEN_ACCOUNTS_SEC)
-
-        await browser.close()
-
-    # Summary
     print(f"\n{'=' * 45}")
     print(f"📊 Done — {total} account(s) processed")
-
-    message = build_notification(all_results, now)
-    send_notification(message)
+    send_notification(build_notification(all_results, now))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    uc.loop().run_until_complete(main())
