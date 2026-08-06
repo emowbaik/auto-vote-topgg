@@ -24,6 +24,8 @@ MAX_RETRIES = 3
 RETRY_DELAY_SEC = 10
 FINAL_STATUSES = frozenset({"success", "cooldown", "captcha_required"})
 TRANSIENT_STATUSES = frozenset({"error", "auth_failed", "uncertain"})
+BROWSER_START_RETRIES = 5
+BROWSER_START_RETRY_SEC = 2
 
 
 class BrowserStartupError(RuntimeError):
@@ -511,16 +513,33 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
 
 
 async def start_browser() -> Any:
-    return await uc.start(
-        headless=False,
-        sandbox=False,
-        browser_args=[
-            "--window-size=1280,720",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
-    )
+    last_error = None
+    for attempt in range(1, BROWSER_START_RETRIES + 1):
+        browser = None
+        try:
+            browser = await uc.start(
+                headless=False,
+                sandbox=False,
+                browser_executable_path=os.environ.get("CHROME_BIN") or None,
+                browser_args=[
+                    "--window-size=1280,720",
+                    "--disable-dev-shm-usage",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            )
+            await browser.get("about:blank")
+            return browser
+        except Exception as exc:
+            last_error = exc
+            if browser:
+                browser.stop()
+            dbg(f"Browser startup {attempt}/{BROWSER_START_RETRIES} failed: {type(exc).__name__}")
+            if attempt < BROWSER_START_RETRIES:
+                await asyncio.sleep(BROWSER_START_RETRY_SEC)
+    raise BrowserStartupError(
+        f"{type(last_error).__name__}: {safe_exception_detail(last_error)}"
+    ) from last_error
 
 
 async def _run_account(
@@ -530,11 +549,8 @@ async def _run_account(
     account_id: str,
     account_cookies: list[dict] | None = None,
 ) -> list[dict]:
-    try:
-        browser = await start_browser()
-        tab = await browser.get("about:blank")
-    except Exception as exc:
-        raise BrowserStartupError(f"{type(exc).__name__}: {exc}") from exc
+    browser = await start_browser()
+    tab = next(iter(browser))
     results = []
     try:
         authenticated = False

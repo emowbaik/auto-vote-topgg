@@ -39,6 +39,7 @@ jobs:
           TG_CHAT_ID:             ${{ secrets.TG_CHAT_ID }}
           SEND_ERROR_SCREENSHOTS: ${{ secrets.SEND_ERROR_SCREENSHOTS }}
           TOPGG_COOKIES_JSON:     ${{ secrets.TOPGG_COOKIES_JSON }}
+          CHROME_BIN:             /usr/bin/google-chrome
         run: xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
 
       - name: Clear old workflow runs
