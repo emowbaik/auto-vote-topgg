@@ -39,6 +39,13 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("&lt;bot&gt;", message)
         self.assertIn("x &lt; y &amp; z &gt; q", message)
 
+    def test_notification_marks_captcha_as_terminal(self):
+        message = vote.build_notification(
+            [[{"account_id": "account", "bot_id": "123", "status": "captcha_required", "detail": "Manual CAPTCHA"}]],
+            "2026-08-07 06:00 WIB",
+        )
+        self.assertIn("🔒 123: Manual CAPTCHA", message)
+
 
 class RetryPolicyTests(unittest.TestCase):
     def test_final_statuses_are_not_retryable(self):

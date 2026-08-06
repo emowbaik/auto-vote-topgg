@@ -1,32 +1,34 @@
 # auto-vote-topgg
 
-Automated daily voting bot for [top.gg](https://top.gg) using Playwright (headless Chromium) + GitHub Actions. Supports multiple Discord accounts and multiple bots.
+Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible Chrome via Xvfb) + GitHub Actions. Supports multiple Discord accounts and multiple bots.
 
 ## Features
 
 - 🗳️ Auto-vote **2× per day** (07:00 & 19:00 WIB) to maximize cooldown cycles
-- 👥 **Multi-account** — vote with multiple Discord tokens in one run
+- 👥 **Multi-account** — vote with multiple Discord tokens and cookie sessions in one run
 - 🤖 **Multi-bot** — vote for multiple bots per account
-- 🔐 **Secure OAuth** — lets top.gg generate its own OAuth URL (with `state` + PKCE), no hardcoded auth URLs
-- ⚡ **Turnstile auto-solve** — Cloudflare Turnstile resolves naturally in headless Chromium
+- 🍪 **Cookie-first auth** — injects only top.gg Auth.js cookies, then verifies the session
+- 🔐 **OAuth fallback** — uses Discord OAuth when cookies are missing or expired
+- ⚡ **Turnstile verification** — nodriver attempts Cloudflare checkbox verification
+- 🔒 **Explicit CAPTCHA status** — interactive CAPTCHA is reported and not retried on the same runner
 - 📨 **Telegram notifications** — per-account vote results sent with privacy-safe account fingerprints
-- 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating successful bots
-- 📸 **Opt-in diagnostics** — optionally sends error/uncertain screenshots to a private Telegram chat
+- 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating final results
+- 📸 **Opt-in diagnostics** — optionally sends error/uncertain/CAPTCHA screenshots to a private Telegram chat
 - 🧹 **Auto-cleanup** — keeps the latest 10 GitHub Actions runs for debugging
 - 📌 **Reproducible builds** — Python packages and GitHub Actions are pinned to tested immutable versions
 
 ## How It Works
 
 ```
-Discord Token
-    ↓ inject via localStorage
-discord.com (authenticated)
-    ↓ navigate to top.gg vote page → click Login
-discord.com/oauth2/authorize (with state + PKCE from top.gg)
-    ↓ scroll OAuth dialog → click Authorize
-top.gg (session established)
-    ↓ navigate to vote page → wait Turnstile → click Vote
-✅ Vote submitted
+TOPGG_COOKIES_JSON (same line order as TOKENS)
+    ↓ inject top.gg Auth.js cookies
+    ↓ verify /api/auth/session
+    ├── valid → skip OAuth
+    └── invalid/missing → Discord token injection → OAuth Authorize
+top.gg authenticated
+    ↓ navigate to vote page → wait ad → nodriver verify_cf()
+    ├── interactive CAPTCHA → captcha_required (no retry this run)
+    └── verified → click Vote → confirm success/cooldown
 ```
 
 ## Setup
@@ -62,13 +64,34 @@ Go to your repo **Settings → Secrets and variables → Actions → New reposit
 | `BOT_IDS` | ❌ | Bot ID(s) to vote for — one per line. Default: `830530156048285716` |
 | `TG_BOT_TOKEN` | ❌ | Telegram bot token (from [@BotFather](https://t.me/BotFather)) |
 | `TG_CHAT_ID` | ❌ | Telegram chat/user ID for vote result notifications |
-| `SEND_ERROR_SCREENSHOTS` | ❌ | Set to `1` to send error/uncertain screenshots to Telegram; default is disabled |
+| `SEND_ERROR_SCREENSHOTS` | ❌ | Set to `1` to send error/uncertain/CAPTCHA screenshots to Telegram; default is disabled |
+| `TOPGG_COOKIES_JSON` | ❌ | Full extension JSON export, one line per account matching `TOKENS` order |
 
 **`TOKENS` multi-account example:**
 ```
 NzI4MjA0NDU4MjcxMjg2NzMy.XXXXXX.YYYYYYYYYYYY
 OTQxNjM3NDU4MjcxMDA2NDAz.XXXXXX.ZZZZZZZZZZZZ
 ```
+
+**`TOPGG_COOKIES_JSON` multi-account format:**
+
+1. Login to top.gg using account 1.
+2. Open **Get cookies.txt LOCALLY** on a top.gg page.
+3. Select export format **JSON**, then click **Copy**.
+4. Paste the copied one-line JSON as line 1 in the secret.
+5. Repeat using account 2 and paste as line 2.
+6. Use `[]` for an account without exported cookies.
+
+```text
+[{"domain":".top.gg","name":"__Secure-authjs.session-token","value":"..."}, ...]
+[{"domain":".top.gg","name":"__Secure-authjs.session-token","value":"..."}, ...]
+[]
+```
+
+The script filters the full export automatically and injects only cookie names containing `authjs` for `top.gg`. The cookie line order must match the `TOKENS` line order.
+
+> [!CAUTION]
+> Auth.js session cookies are login credentials. Store them only in GitHub Secrets; never commit or share them.
 
 **`BOT_IDS` multi-bot example:**
 ```
@@ -111,9 +134,9 @@ DEBUG=1 python vote.py
 
 Screenshots will be saved to `screenshots/` (gitignored) when local `DEBUG=1` is enabled.
 
-For GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error and uncertain states will send screenshots to the configured Telegram chat. Keep that chat private: screenshots may contain Discord username, avatar, or top.gg account details. Without this secret, workflow screenshots remain disabled.
+For GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error, uncertain, and CAPTCHA states will send screenshots to the configured Telegram chat. Keep that chat private: screenshots may contain Discord username, avatar, or top.gg account details. Without this secret, workflow screenshots remain disabled.
 
-Transient authentication/browser failures retry up to 3 times. In multi-bot runs, only bots with `error` or `uncertain` results retry; successful and cooldown bots are not repeated. Telegram reports identify accounts using a short SHA-256 fingerprint, never token fragments.
+Transient authentication/browser failures retry up to 3 times. In multi-bot runs, only bots with `error` or `uncertain` results retry; `success`, `cooldown`, and `captcha_required` are final for the current run. Interactive CAPTCHA is intentionally not retried on the same runner/IP. Telegram reports identify accounts using a short SHA-256 fingerprint, never token fragments.
 
 ## Project Structure
 
@@ -130,8 +153,9 @@ auto-vote-topgg/
 ## Requirements
 
 - Python 3.11+
-- `playwright==1.61.0` + `requests==2.32.5` (pinned in `requirements.txt`)
-- Chromium (installed automatically by `playwright install chromium`)
+- `nodriver==0.50.3` + `requests==2.32.5` (pinned in `requirements.txt`)
+- Google Chrome/Chromium
+- Xvfb on headless Linux runners (installed by workflow)
 
 ## ⚠️ Disclaimer
 
