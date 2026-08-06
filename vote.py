@@ -25,6 +25,10 @@ RETRY_DELAY_SEC = 10
 FINAL_STATUSES = frozenset({"success", "cooldown", "captcha_required"})
 TRANSIENT_STATUSES = frozenset({"error", "auth_failed", "uncertain"})
 
+
+class BrowserStartupError(RuntimeError):
+    """Credential-free nodriver startup failure safe for workflow logs."""
+
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 DEBUG = os.environ.get("DEBUG", "").strip() == "1"
@@ -496,8 +500,11 @@ async def _run_account(
     account_id: str,
     account_cookies: list[dict] | None = None,
 ) -> list[dict]:
-    browser = await start_browser()
-    tab = await browser.get("about:blank")
+    try:
+        browser = await start_browser()
+        tab = await browser.get("about:blank")
+    except Exception as exc:
+        raise BrowserStartupError(f"{type(exc).__name__}: {exc}") from exc
     results = []
     try:
         authenticated = False
@@ -553,7 +560,10 @@ async def process_account(
                 browser, token, pending, account_id, account_cookies
             )
         except Exception as exc:
-            detail = f"{type(exc).__name__}: transient browser failure"
+            if isinstance(exc, BrowserStartupError):
+                detail = f"Browser startup failed: {exc}"
+            else:
+                detail = f"{type(exc).__name__}: transient browser failure"
             last_account_error = {
                 "bot_id": "all", "status": "error",
                 "detail": detail, "account_id": account_id,
