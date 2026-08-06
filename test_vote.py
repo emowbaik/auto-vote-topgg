@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -58,6 +59,39 @@ class RetryPolicyTests(unittest.TestCase):
             {"bot_id": "all", "status": "auth_failed"},
         ]
         self.assertEqual(vote.retryable_bot_ids(results), ["111", "333"])
+
+    def test_captcha_required_is_terminal(self):
+        result = {"bot_id": "111", "status": "captcha_required"}
+        self.assertFalse(vote.is_retryable_result(result))
+        self.assertEqual(vote.retryable_bot_ids([result]), [])
+
+
+class CookieLoaderTests(unittest.TestCase):
+    def test_cookie_lines_match_accounts_and_filter_non_authjs(self):
+        first = [
+            {"domain": ".top.gg", "name": "__Secure-authjs.session-token", "value": "one", "sameSite": "lax"},
+            {"domain": ".top.gg", "name": "_ga", "value": "tracking"},
+        ]
+        second = [
+            {"domain": "top.gg", "name": "__Host-authjs.csrf-token", "value": "two", "sameSite": "no_restriction"},
+        ]
+        raw = f"{json.dumps(first)}\n[]\n{json.dumps(second)}"
+        with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": raw}):
+            cookies = vote.load_topgg_cookies()
+        self.assertEqual(len(cookies), 3)
+        self.assertEqual([cookie["name"] for cookie in cookies[0]], ["__Secure-authjs.session-token"])
+        self.assertEqual(cookies[0][0]["sameSite"], "Lax")
+        self.assertEqual(cookies[1], [])
+        self.assertEqual(cookies[2][0]["sameSite"], "None")
+
+    def test_empty_cookie_secret_returns_empty_list(self):
+        with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": ""}):
+            self.assertEqual(vote.load_topgg_cookies(), [])
+
+    def test_invalid_cookie_line_reports_account_number(self):
+        with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": "[]\nnot-json"}):
+            with self.assertRaisesRegex(ValueError, "line 2"):
+                vote.load_topgg_cookies()
 
 
 class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):

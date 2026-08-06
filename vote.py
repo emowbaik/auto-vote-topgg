@@ -17,6 +17,7 @@ Environment variables (GitHub Secrets):
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
 from datetime import datetime, timezone, timedelta
@@ -41,7 +42,7 @@ DELAY_BETWEEN_BOTS_SEC = 3
 DELAY_BETWEEN_ACCOUNTS_SEC = 5
 MAX_RETRIES = 3
 RETRY_DELAY_SEC = 10
-FINAL_STATUSES = frozenset({"success", "cooldown"})
+FINAL_STATUSES = frozenset({"success", "cooldown", "captcha_required"})
 TRANSIENT_STATUSES = frozenset({"error", "auth_failed", "uncertain"})
 
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
@@ -147,6 +148,57 @@ def retryable_bot_ids(results: list[dict]) -> list[str]:
         for result in results
         if is_retryable_result(result) and result.get("bot_id") not in {None, "all"}
     ]
+
+
+def _normalize_cookie(cookie: dict) -> dict:
+    """Convert browser-extension cookie JSON to CDP-compatible fields."""
+    normalized = {
+        "name": str(cookie["name"]),
+        "value": str(cookie["value"]),
+        "domain": str(cookie.get("domain", ".top.gg")),
+        "path": str(cookie.get("path", "/")),
+        "secure": bool(cookie.get("secure", True)),
+        "httpOnly": bool(cookie.get("httpOnly", False)),
+    }
+    expiration = cookie.get("expirationDate", cookie.get("expires"))
+    if expiration and float(expiration) > 0:
+        normalized["expires"] = float(expiration)
+    same_site = str(cookie.get("sameSite", "Lax")).lower()
+    normalized["sameSite"] = {
+        "lax": "Lax",
+        "strict": "Strict",
+        "none": "None",
+        "no_restriction": "None",
+        "unspecified": "Lax",
+    }.get(same_site, "Lax")
+    return normalized
+
+
+def load_topgg_cookies() -> list[list[dict]]:
+    """Load one top.gg Auth.js cookie JSON array per account line."""
+    raw = os.environ.get("TOPGG_COOKIES_JSON", "")
+    if not raw.strip():
+        return []
+
+    account_cookies = []
+    for index, line in enumerate(raw.splitlines(), 1):
+        line = line.strip()
+        if not line or line == "[]":
+            account_cookies.append([])
+            continue
+        try:
+            cookies = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid TOPGG_COOKIES_JSON at line {index}") from exc
+        if not isinstance(cookies, list):
+            raise ValueError(f"TOPGG_COOKIES_JSON line {index} must be a JSON array")
+        account_cookies.append([
+            _normalize_cookie(cookie)
+            for cookie in cookies
+            if cookie.get("domain") in {"top.gg", ".top.gg"}
+            and "authjs" in str(cookie.get("name", "")).lower()
+        ])
+    return account_cookies
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +647,12 @@ def build_notification(all_results: list[list[dict]], now: str) -> str:
             status = r.get("status", "?")
             detail = escape(str(r.get("detail", "")))
 
-            icon = {"success": "✅", "cooldown": "⏳", "uncertain": "⚠️"}.get(status, "❌")
+            icon = {
+                "success": "✅",
+                "cooldown": "⏳",
+                "uncertain": "⚠️",
+                "captcha_required": "🔒",
+            }.get(status, "❌")
             lines.append(f"  {icon} {bot_id}: {detail}")
 
         lines.append("")
