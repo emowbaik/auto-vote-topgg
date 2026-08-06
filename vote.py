@@ -196,7 +196,16 @@ def send_notification(message: str) -> None:
 
 
 async def evaluate(tab: Any, expression: str) -> Any:
-    return await tab.evaluate(expression, await_promise=True, return_by_value=True)
+    remote_object, exception = await tab.send(uc.cdp.runtime.evaluate(
+        expression=expression,
+        user_gesture=True,
+        await_promise=True,
+        return_by_value=True,
+        allow_unsafe_eval_blocked_by_csp=True,
+    ))
+    if exception:
+        raise RuntimeError("JavaScript evaluation failed")
+    return remote_object.value if remote_object else None
 
 
 async def body_text(tab: Any) -> str:
