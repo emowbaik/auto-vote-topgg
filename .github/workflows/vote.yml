@@ -27,7 +27,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium --with-deps
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          command -v google-chrome || command -v chromium || command -v chromium-browser
 
       - name: Run vote
         env:
@@ -36,7 +38,8 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID:             ${{ secrets.TG_CHAT_ID }}
           SEND_ERROR_SCREENSHOTS: ${{ secrets.SEND_ERROR_SCREENSHOTS }}
-        run: python vote.py
+          TOPGG_COOKIES_JSON:     ${{ secrets.TOPGG_COOKIES_JSON }}
+        run: xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
 
       - name: Clear old workflow runs
         if: always()
