@@ -2,6 +2,12 @@
 
 Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible Chrome via Xvfb) + GitHub Actions. Supports multiple Discord accounts and multiple bots.
 
+## Architecture at a Glance
+
+[![auto-vote-topgg repository architecture](assets/repo_infographic.png)](assets/repo_infographic.svg)
+
+> Cookie-first session verification leads into Discord OAuth fallback, terminal CAPTCHA handling, truthful CI outcomes, Telegram reporting, and isolated security controls. Click image for scalable SVG.
+
 ## Features
 
 - 🗳️ Auto-vote **2× per day** (07:00 & 19:00 WIB) to maximize cooldown cycles
