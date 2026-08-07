@@ -22,6 +22,21 @@ class LoaderTests(unittest.TestCase):
                 vote.load_bot_ids()
 
 
+class UrlMatchingTests(unittest.TestCase):
+    def test_matches_topgg_host_and_subdomain(self):
+        self.assertTrue(vote.url_has_domain("https://top.gg/bot/123/vote", "top.gg"))
+        self.assertTrue(vote.url_has_domain("https://www.top.gg/callback", "top.gg"))
+
+    def test_rejects_topgg_text_outside_hostname(self):
+        oauth_url = (
+            "https://discord.com/oauth2/authorize?"
+            "redirect_uri=https%3A%2F%2Ftop.gg%2Fapi%2Fauth%2Fcallback"
+        )
+        self.assertFalse(vote.url_has_domain(oauth_url, "top.gg"))
+        self.assertFalse(vote.url_has_domain("https://top.gg.evil.example/path", "top.gg"))
+        self.assertFalse(vote.url_has_domain("https://example.com/top.gg", "top.gg"))
+
+
 class ReportingTests(unittest.TestCase):
     def test_account_fingerprint_is_stable_and_hides_token(self):
         token = "sensitive-token-value"

@@ -9,6 +9,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
+from urllib.parse import urlparse
 
 import nodriver as uc
 import requests
@@ -227,6 +228,22 @@ async def wait_for_url(tab: Any, needle: str, timeout: int) -> bool:
     return False
 
 
+def url_has_domain(url: str, domain: str) -> bool:
+    """Match exact hostname or its subdomain, never URL query/path text."""
+    hostname = (urlparse(url).hostname or "").lower().rstrip(".")
+    domain = domain.lower().rstrip(".")
+    return hostname == domain or hostname.endswith(f".{domain}")
+
+
+async def wait_for_domain(tab: Any, domain: str, timeout: int) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if url_has_domain(await current_url(tab), domain):
+            return True
+        await asyncio.sleep(1)
+    return False
+
+
 async def _mark_exact_element(tab: Any, selector: str, texts: list[str], marker: str) -> bool:
     script = f"""(() => {{
         const wanted = {json.dumps(texts)};
@@ -298,7 +315,7 @@ async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) 
 async def _handle_discord_oauth(tab: Any) -> bool:
     print("  → Handling Discord OAuth dialog...")
     for attempt in range(12):
-        if "top.gg" in await current_url(tab):
+        if url_has_domain(await current_url(tab), "top.gg"):
             return True
         marker = "data-auto-oauth"
         if await _mark_exact_element(tab, "button", ["Authorize", "Authorise"], marker):
@@ -346,13 +363,16 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> bool:
     if not await _click_marked(tab, marker):
         print("  ❌ Could not click top.gg Login button")
         return False
-    if not await wait_for_url(tab, "discord.com/oauth2/authorize", TIMEOUT_OAUTH_SEC):
+    if not await wait_for_domain(tab, "discord.com", TIMEOUT_OAUTH_SEC):
         print("  ❌ Discord OAuth page did not open")
+        return False
+    if "/oauth2/authorize" not in urlparse(await current_url(tab)).path:
+        print("  ❌ Unexpected Discord redirect")
         return False
     if not await _handle_discord_oauth(tab):
         print("  ❌ Could not authorize top.gg")
         return False
-    if not await wait_for_url(tab, "top.gg", TIMEOUT_OAUTH_SEC):
+    if not await wait_for_domain(tab, "top.gg", TIMEOUT_OAUTH_SEC):
         print("  ❌ OAuth redirect failed")
         return False
     await asyncio.sleep(3)
