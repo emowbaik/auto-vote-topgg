@@ -13,12 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      actions: write
       contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -27,7 +28,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --require-hashes -r requirements.lock
           sudo apt-get update
           sudo apt-get install -y xvfb
           CHROME_BIN="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
@@ -62,18 +63,24 @@ jobs:
           unset TOKENS TOPGG_COOKIES_JSON TG_BOT_TOKEN TG_CHAT_ID
           xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
 
+  cleanup:
+    needs: vote
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
       - name: Clear old workflow runs
-        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          runs=$(gh run list --repo="${{ github.repository }}" --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
           count=0
           for run_id in $runs; do
             count=$((count + 1))
             if [ $count -gt 10 ]; then
               echo "Deleting old run: $run_id"
-              gh run delete $run_id || true
+              gh run delete --repo="${{ github.repository }}" "$run_id" || true
             fi
           done
           echo "✅ Cleanup done — latest 10 runs kept."
