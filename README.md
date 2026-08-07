@@ -89,7 +89,7 @@ OTQxNjM3NDU4MjcxMDA2NDAz.XXXXXX.ZZZZZZZZZZZZ
 []
 ```
 
-The script filters full export automatically and injects only cookie names containing `authjs` for `top.gg`. When this secret exists, its line count must exactly match `TOKENS`; use `[]` for any account without cookies. Every injected Auth.js cookie must export `secure: true`; session-token cookies must also export `httpOnly: true`. Invalid/misaligned exports fail before browser startup without printing cookie values.
+The script filters full export automatically and injects only cookie names containing `authjs` for `top.gg`. When this secret exists, its line count must exactly match `TOKENS`; use `[]` for any account without cookies. Before injection, every Auth.js cookie is forced to `Secure` and every session-token cookie is forced to `HttpOnly`, even when extension export omits or misreports those flags. Invalid/misaligned exports fail before browser startup without printing cookie values.
 
 > [!CAUTION]
 > Auth.js session cookies are login credentials. Store them only in GitHub Secrets; never commit or share them.
