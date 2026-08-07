@@ -162,11 +162,25 @@ class RetryPolicyTests(unittest.TestCase):
 class CookieLoaderTests(unittest.TestCase):
     def test_cookie_lines_match_accounts_and_filter_non_authjs(self):
         first = [
-            {"domain": ".top.gg", "name": "__Secure-authjs.session-token", "value": "one", "sameSite": "lax"},
+            {
+                "domain": ".top.gg",
+                "name": "__Secure-authjs.session-token",
+                "value": "one",
+                "sameSite": "lax",
+                "secure": True,
+                "httpOnly": True,
+            },
             {"domain": ".top.gg", "name": "_ga", "value": "tracking"},
         ]
         second = [
-            {"domain": "top.gg", "name": "__Host-authjs.csrf-token", "value": "two", "sameSite": "no_restriction"},
+            {
+                "domain": "top.gg",
+                "name": "__Host-authjs.csrf-token",
+                "value": "two",
+                "sameSite": "no_restriction",
+                "secure": True,
+                "httpOnly": False,
+            },
         ]
         raw = f"{json.dumps(first)}\n[]\n{json.dumps(second)}"
         with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": raw}):
@@ -207,6 +221,8 @@ class CookieLoaderTests(unittest.TestCase):
             "domain": ".top.gg",
             "name": "__Secure-authjs.session-token",
             "value": secret_value,
+            "secure": True,
+            "httpOnly": True,
             "expirationDate": "tomorrow",
         }]
         with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": json.dumps(cookies)}):
@@ -214,6 +230,40 @@ class CookieLoaderTests(unittest.TestCase):
                 vote.load_topgg_cookies(1)
         self.assertIn("invalid expiry", str(context.exception))
         self.assertNotIn(secret_value, str(context.exception))
+
+    def test_authjs_cookie_requires_secure_attribute_without_value_leak(self):
+        secret_value = "never-print-this-cookie"
+        for secure in (None, False):
+            cookie = {
+                "domain": ".top.gg",
+                "name": "authjs.csrf-token",
+                "value": secret_value,
+                "httpOnly": False,
+            }
+            if secure is not None:
+                cookie["secure"] = secure
+            with self.subTest(secure=secure):
+                with self.assertRaises(ValueError) as context:
+                    vote.load_topgg_cookies(1, json.dumps([cookie]))
+                self.assertIn("must be Secure", str(context.exception))
+                self.assertNotIn(secret_value, str(context.exception))
+
+    def test_session_cookie_requires_httponly_without_value_leak(self):
+        secret_value = "never-print-this-cookie"
+        for http_only in (None, False):
+            cookie = {
+                "domain": ".top.gg",
+                "name": "__Secure-authjs.session-token",
+                "value": secret_value,
+                "secure": True,
+            }
+            if http_only is not None:
+                cookie["httpOnly"] = http_only
+            with self.subTest(httpOnly=http_only):
+                with self.assertRaises(ValueError) as context:
+                    vote.load_topgg_cookies(1, json.dumps([cookie]))
+                self.assertIn("must be HttpOnly", str(context.exception))
+                self.assertNotIn(secret_value, str(context.exception))
 
     def test_wrong_domain_export_is_rejected(self):
         cookies = [{
