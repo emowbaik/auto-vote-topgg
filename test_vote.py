@@ -301,6 +301,62 @@ class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
         browser.stop.assert_called_once()
 
 
+class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch.object(vote, "BROWSER_START_RETRIES", 1)
+    @patch("vote.uc.Browser")
+    @patch("vote.uc.Config")
+    async def test_partial_start_failure_is_cleaned(
+        self, _config, browser_class, _sleep
+    ):
+        browser = browser_class.return_value
+        browser.start = AsyncMock(side_effect=RuntimeError("connect failed"))
+        browser.aclose = AsyncMock()
+
+        with self.assertRaises(vote.BrowserStartupError):
+            await vote.start_browser()
+
+        browser.aclose.assert_awaited_once()
+        browser.stop.assert_called_once()
+
+
+class FullOrchestrationTests(unittest.IsolatedAsyncioTestCase):
+    @patch("builtins.print")
+    async def test_cookie_fallback_captcha_reports_failure_without_retry(self, _print):
+        browser = MagicMock()
+        browser.__iter__.return_value = iter([AsyncMock()])
+        browser.cookies.clear = AsyncMock()
+        browser.aclose = AsyncMock()
+        account_cookies = [[{"name": "__Secure-authjs.session-token"}]]
+        captcha = {
+            "bot_id": "111",
+            "status": "captcha_required",
+            "detail": "CAPTCHA appeared after clicking Vote",
+        }
+
+        with (
+            patch("vote.load_tokens", return_value=["token"]),
+            patch("vote.load_bot_ids", return_value=["111"]),
+            patch("vote.load_topgg_cookies", return_value=account_cookies),
+            patch("vote.start_browser", new=AsyncMock(return_value=browser)),
+            patch("vote.login_with_cookies", new=AsyncMock(return_value=vote.AUTH_INVALID)) as cookie_login,
+            patch("vote.discord_oauth_login", new=AsyncMock(return_value=vote.AUTHENTICATED)) as oauth_login,
+            patch("vote.vote_for_bot", new=AsyncMock(return_value=captcha)) as vote_for_bot,
+            patch("vote.send_notification") as send_notification,
+            patch("vote.asyncio.sleep", new=AsyncMock()),
+        ):
+            exit_code = await vote.main()
+
+        self.assertEqual(exit_code, 1)
+        cookie_login.assert_awaited_once()
+        oauth_login.assert_awaited_once()
+        vote_for_bot.assert_awaited_once()
+        send_notification.assert_called_once()
+        self.assertIn("CAPTCHA appeared after clicking Vote", send_notification.call_args.args[0])
+        browser.aclose.assert_awaited_once()
+        browser.stop.assert_called_once()
+
+
 class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):
     @patch.object(vote, "SEND_ERROR_SCREENSHOTS", False)
     async def test_error_screenshot_is_disabled_by_default(self):

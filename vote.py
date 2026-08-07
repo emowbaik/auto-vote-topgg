@@ -63,12 +63,6 @@ def safe_exception_detail(exc: Exception) -> str:
     return detail[:200] or "no detail"
 
 
-async def screenshot(tab: Any, path: str) -> None:
-    if DEBUG:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        await tab.save_screenshot(filename=path, format="png")
-
-
 async def error_screenshot(tab: Any, path: str) -> str | None:
     if not SEND_ERROR_SCREENSHOTS:
         return None
@@ -293,15 +287,6 @@ async def body_text(tab: Any) -> str:
 
 async def current_url(tab: Any) -> str:
     return str(await evaluate(tab, "location.href") or "")
-
-
-async def wait_for_url(tab: Any, needle: str, timeout: int) -> bool:
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        if needle in await current_url(tab):
-            return True
-        await asyncio.sleep(1)
-    return False
 
 
 def url_has_domain(url: str, domain: str) -> bool:
