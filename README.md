@@ -11,9 +11,10 @@ Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible 
 - 🔐 **OAuth fallback** — uses Discord OAuth when cookies are missing or expired
 - ⚡ **Turnstile verification** — nodriver attempts Cloudflare checkbox verification
 - 🔒 **Explicit CAPTCHA status** — interactive CAPTCHA is reported and not retried on the same runner
-- 📨 **Telegram notifications** — per-account vote results sent with privacy-safe account fingerprints
+- 📨 **Telegram notifications** — chunked per-account reports with privacy-safe account fingerprints
 - 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating final results
 - 📸 **Opt-in diagnostics** — optionally sends error/uncertain/CAPTCHA screenshots to a private Telegram chat
+- 🚦 **Truthful CI status** — incomplete votes report to Telegram, then fail the workflow
 - 🧹 **Auto-cleanup** — keeps the latest 10 GitHub Actions runs for debugging
 - 📌 **Reproducible builds** — Python packages and GitHub Actions are pinned to tested immutable versions
 
@@ -88,7 +89,7 @@ OTQxNjM3NDU4MjcxMDA2NDAz.XXXXXX.ZZZZZZZZZZZZ
 []
 ```
 
-The script filters the full export automatically and injects only cookie names containing `authjs` for `top.gg`. The cookie line order must match the `TOKENS` line order.
+The script filters the full export automatically and injects only cookie names containing `authjs` for `top.gg`. When this secret exists, its line count must exactly match `TOKENS`; use `[]` for any account without cookies. Invalid/misaligned exports fail before browser startup without printing cookie values.
 
 > [!CAUTION]
 > Auth.js session cookies are login credentials. Store them only in GitHub Secrets; never commit or share them.
@@ -122,7 +123,7 @@ If your workflow is ever disabled:
 
 ## Debugging
 
-To enable verbose logging and screenshots locally, set `DEBUG=1`:
+To enable verbose diagnostic logging locally, set `DEBUG=1`:
 
 ```bash
 # Windows
@@ -132,11 +133,13 @@ set DEBUG=1 && python vote.py
 DEBUG=1 python vote.py
 ```
 
-Screenshots will be saved to `screenshots/` (gitignored) when local `DEBUG=1` is enabled.
+Error screenshots remain disabled unless `SEND_ERROR_SCREENSHOTS=1` is set.
 
 For GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error, uncertain, and CAPTCHA states will send screenshots to the configured Telegram chat. Keep that chat private: screenshots may contain Discord username, avatar, or top.gg account details. Without this secret, workflow screenshots remain disabled.
 
-Transient authentication/browser failures retry up to 3 times. In multi-bot runs, only bots with `error` or `uncertain` results retry; `success`, `cooldown`, and `captcha_required` are final for the current run. Interactive CAPTCHA is intentionally not retried on the same runner/IP. Telegram reports identify accounts using a short SHA-256 fingerprint, never token fragments.
+Transient authentication/browser failures retry up to 3 times. In multi-bot runs, only bots with `error` or `uncertain` results retry; `success`, `cooldown`, and `captcha_required` are final for the current run. Interactive CAPTCHA is intentionally not retried on the same runner/IP. Telegram reports identify accounts using a short SHA-256 fingerprint, never token fragments, and split automatically below Telegram's message limit.
+
+Only `success` and `cooldown` count as completed business outcomes. `error`, `auth_failed`, `uncertain`, or `captcha_required` sends its report first, then exits non-zero so GitHub Actions shows failure.
 
 ## Project Structure
 
@@ -154,7 +157,7 @@ auto-vote-topgg/
 
 - Python 3.11+
 - `nodriver==0.50.3` + `requests==2.32.5` (pinned in `requirements.txt`)
-- Google Chrome/Chromium
+- Google Chrome/Chromium (discovered dynamically by workflow)
 - Xvfb on headless Linux runners (installed by workflow)
 
 ## ⚠️ Disclaimer
