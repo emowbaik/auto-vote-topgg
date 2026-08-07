@@ -84,6 +84,8 @@ OTQxNjM3NDU4MjcxMDA2NDAz.XXXXXX.ZZZZZZZZZZZZ
 
 **`TOPGG_COOKIES_JSON` multi-account format:**
 
+Install [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) from Chrome Web Store first. Cookie export stays local to browser according to extension listing, but exported Auth.js session data remains a sensitive login credential.
+
 1. Login to top.gg using account 1.
 2. Open **Get cookies.txt LOCALLY** on a top.gg page.
 3. Select export format **JSON**, then click **Copy**.
