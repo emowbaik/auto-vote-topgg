@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Fail CI when locked PyPI packages have known OSV advisories."""
 
 import json
