@@ -62,6 +62,44 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("🔒 123: Manual CAPTCHA", message)
 
 
+class BusinessResultTests(unittest.TestCase):
+    def test_success_and_cooldown_are_completed(self):
+        results = [[
+            {"status": "success"},
+            {"status": "cooldown"},
+        ]]
+        self.assertFalse(vote.has_business_failure(results))
+
+    def test_incomplete_statuses_fail_workflow(self):
+        for status in ("error", "auth_failed", "uncertain", "captcha_required"):
+            with self.subTest(status=status):
+                self.assertTrue(vote.has_business_failure([[{"status": status}]]))
+
+    def test_empty_results_fail_workflow(self):
+        self.assertTrue(vote.has_business_failure([]))
+        self.assertTrue(vote.has_business_failure([[]]))
+
+
+class MainExitTests(unittest.IsolatedAsyncioTestCase):
+    @patch("builtins.print")
+    @patch("vote.send_notification")
+    @patch("vote.process_account", new_callable=AsyncMock)
+    @patch("vote.load_topgg_cookies", return_value=[])
+    @patch("vote.load_bot_ids", return_value=["111"])
+    @patch("vote.load_tokens", return_value=["token"])
+    async def test_main_notifies_before_returning_failure(
+        self, _tokens, _bots, _cookies, process_account, send_notification, _print
+    ):
+        process_account.return_value = [
+            {"account_id": "id", "bot_id": "111", "status": "captcha_required", "detail": "captcha"}
+        ]
+
+        exit_code = await vote.main()
+
+        self.assertEqual(exit_code, 1)
+        send_notification.assert_called_once()
+
+
 class RetryPolicyTests(unittest.TestCase):
     def test_final_statuses_are_not_retryable(self):
         for status in ("success", "cooldown"):

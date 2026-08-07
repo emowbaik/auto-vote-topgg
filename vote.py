@@ -5,7 +5,6 @@ import asyncio
 import hashlib
 import json
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
@@ -24,6 +23,7 @@ DELAY_BETWEEN_ACCOUNTS_SEC = 5
 MAX_RETRIES = 3
 RETRY_DELAY_SEC = 10
 FINAL_STATUSES = frozenset({"success", "cooldown", "captcha_required"})
+COMPLETED_STATUSES = frozenset({"success", "cooldown"})
 TRANSIENT_STATUSES = frozenset({"error", "auth_failed", "uncertain"})
 BROWSER_START_RETRIES = 5
 BROWSER_START_RETRY_SEC = 2
@@ -724,11 +724,19 @@ def build_notification(all_results: list[list[dict]], now: str) -> str:
     return "\n".join(lines).strip()
 
 
-async def main() -> None:
+def has_business_failure(all_results: list[list[dict]]) -> bool:
+    return not all_results or any(
+        not account_results
+        or any(result.get("status") not in COMPLETED_STATUSES for result in account_results)
+        for account_results in all_results
+    )
+
+
+async def main() -> int:
     tokens = load_tokens()
     if not tokens:
         print("❌ No tokens found.\n   Set TOKENS secret (one Discord user token per line).")
-        sys.exit(1)
+        return 1
 
     bot_ids = load_bot_ids()
     all_cookies = load_topgg_cookies()
@@ -751,7 +759,8 @@ async def main() -> None:
     print(f"\n{'=' * 45}")
     print(f"📊 Done — {total} account(s) processed")
     send_notification(build_notification(all_results, now))
+    return 1 if has_business_failure(all_results) else 0
 
 
 if __name__ == "__main__":
-    uc.loop().run_until_complete(main())
+    raise SystemExit(uc.loop().run_until_complete(main()))
