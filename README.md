@@ -74,6 +74,8 @@ Go to your repo **Settings → Secrets and variables → Actions → New reposit
 | `SEND_ERROR_SCREENSHOTS` | ❌ | Set to `1` to send error/uncertain/CAPTCHA screenshots to Telegram; default is disabled |
 | `TOPGG_COOKIES_JSON` | ❌ | Full extension JSON export, one line per account matching `TOKENS` order |
 
+At runtime, workflow copies credential secrets into mode-`0600` temporary files, unsets raw values, and passes only file paths to Python. Python reads and unlinks those files before Chrome starts. `BOT_IDS` and `SEND_ERROR_SCREENSHOTS` are non-credential configuration values and remain ordinary environment variables.
+
 **`TOKENS` multi-account example:**
 ```
 NzI4MjA0NDU4MjcxMjg2NzMy.XXXXXX.YYYYYYYYYYYY
@@ -152,19 +154,24 @@ Only `success` and `cooldown` count as completed business outcomes. `error`, `au
 
 ## Project Structure
 
-```
+```text
 auto-vote-topgg/
-├── vote.py                          # Main voting script
+├── vote.py                          # Auth, vote, retry, report, browser lifecycle
+├── test_vote.py                     # 42 unit/regression tests
+├── audit_dependencies.py            # Stdlib OSV dependency audit
 ├── requirements.txt                 # Direct Python dependencies
 ├── requirements.lock                # Linux/Python 3.11 hashes and transitive pins
-├── audit_dependencies.py            # Stdlib OSV dependency audit
+├── README.md                        # Setup and operating guide
 ├── SECURITY.md                      # Disclosure and credential policy
+├── assets/
+│   ├── repo_infographic.png         # README preview
+│   └── repo_infographic.svg         # Scalable architecture source
 ├── .github/
-│   ├── CODEOWNERS
-│   ├── dependabot.yml
+│   ├── CODEOWNERS                   # Sensitive-file ownership
+│   ├── dependabot.yml               # Weekly pip/Actions updates
 │   └── workflows/
-│       ├── security.yml              # Unit and dependency security checks
-│       └── vote.yml                  # GitHub Actions schedule and job
+│       ├── security.yml             # Tests and dependency audit
+│       └── vote.yml                 # Schedule, secret handoff, vote, cleanup
 └── .gitignore
 ```
 
@@ -176,21 +183,34 @@ auto-vote-topgg/
 - Google Chrome/Chromium (discovered dynamically by workflow)
 - Xvfb on headless Linux runners (installed by workflow)
 
-CI installs dependencies with:
+### Local install
+
+`requirements.lock` intentionally targets GitHub's Linux x86_64 / CPython 3.11 runner. For local development on Windows, macOS, or another Python ABI, install reviewed direct pins:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### GitHub Actions install
+
+CI verifies exact Linux wheels with:
 
 ```bash
 python -m pip install --require-hashes -r requirements.lock
 ```
 
-Run point-in-time advisory scan with:
+Run local checks:
 
 ```bash
+python -m unittest -v
+python -m py_compile vote.py test_vote.py audit_dependencies.py
+python -m pip check
 python audit_dependencies.py requirements.lock
 ```
 
 Dependabot checks pip and GitHub Actions weekly. Regenerate lock by downloading CPython 3.11 Linux x86_64 wheels for `requirements.txt`, recording exact transitive versions, and adding each wheel SHA-256. Verify resulting install on GitHub Actions before merging.
 
-`master` is managed through pull requests and required security checks. Direct pushes, force pushes, and branch deletion are blocked after protection is applied.
+`master` accepts changes through pull requests. Required `test` and `dependency-audit` checks must pass; branches must be current, conversations resolved, and history linear. Admins follow same policy. Force pushes and branch deletion are blocked. Human approvals remain `0` while repository has only one trusted collaborator.
 
 ## ⚠️ Disclaimer
 

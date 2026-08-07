@@ -1,4 +1,4 @@
-ï»¿# Security Policy
+# Security Policy
 
 ## Supported Version
 
@@ -6,7 +6,7 @@ Security fixes apply to latest commit on `master`.
 
 ## Reporting a Vulnerability
 
-Do not open public issue containing credentials, cookies, screenshots, or exploit details. Use GitHub private vulnerability reporting for this repository. If unavailable, contact repository owner privately through GitHub profile.
+Do not open public issue containing credentials, cookies, screenshots, or exploit details. Use [GitHub private vulnerability reporting](https://github.com/emowbaik/auto-vote-topgg/security/advisories/new) for this repository.
 
 Include affected commit, reproduction steps without live credentials, impact, and suggested mitigation if known.
 
@@ -30,7 +30,8 @@ Workflow secrets are handed to Python through mode-`0600` temporary files. Pytho
 - OSV dependency audit in CI.
 - Secret scanning and push protection.
 - Browser sandbox for non-root runners.
-- `Secure` Auth.js cookies and `HttpOnly` session-token cookies.
+- Every Auth.js cookie forced to `Secure` during injection.
+- Every Auth.js session-token cookie forced to `HttpOnly` during injection.
 - Credential redaction in normal diagnostics.
 - Separate write-capable workflow cleanup job without user credentials.
 
