@@ -11,6 +11,7 @@ on:
 jobs:
   vote:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: write
       contents: read
@@ -29,7 +30,9 @@ jobs:
           pip install -r requirements.txt
           sudo apt-get update
           sudo apt-get install -y xvfb
-          command -v google-chrome || command -v chromium || command -v chromium-browser
+          CHROME_BIN="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+          test -n "$CHROME_BIN" || { echo "No supported Chrome/Chromium executable found"; exit 1; }
+          echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
 
       - name: Run vote
         env:
@@ -39,7 +42,6 @@ jobs:
           TG_CHAT_ID:             ${{ secrets.TG_CHAT_ID }}
           SEND_ERROR_SCREENSHOTS: ${{ secrets.SEND_ERROR_SCREENSHOTS }}
           TOPGG_COOKIES_JSON:     ${{ secrets.TOPGG_COOKIES_JSON }}
-          CHROME_BIN:             /usr/bin/google-chrome
         run: xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
 
       - name: Clear old workflow runs

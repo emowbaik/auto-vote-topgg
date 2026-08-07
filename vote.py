@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
@@ -567,28 +568,37 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
     return {"bot_id": bot_id, "status": "uncertain", "detail": "Clicked, result unclear"}
 
 
+async def close_browser(browser: Any) -> None:
+    if browser is None:
+        return
+    with suppress(Exception):
+        await browser.aclose()
+    with suppress(Exception):
+        browser.stop()
+
+
 async def start_browser() -> Any:
     last_error = None
     for attempt in range(1, BROWSER_START_RETRIES + 1):
-        browser = None
+        config = uc.Config(
+            headless=False,
+            sandbox=True,
+            browser_executable_path=os.environ.get("CHROME_BIN") or None,
+            browser_args=[
+                "--window-size=1280,720",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+        browser = uc.Browser(config)
         try:
-            browser = await uc.start(
-                headless=False,
-                sandbox=False,
-                browser_executable_path=os.environ.get("CHROME_BIN") or None,
-                browser_args=[
-                    "--window-size=1280,720",
-                    "--disable-dev-shm-usage",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                ],
-            )
+            await browser.start()
             await browser.get("about:blank")
             return browser
         except Exception as exc:
             last_error = exc
-            if browser:
-                browser.stop()
+            await close_browser(browser)
             dbg(f"Browser startup {attempt}/{BROWSER_START_RETRIES} failed: {type(exc).__name__}")
             if attempt < BROWSER_START_RETRIES:
                 await asyncio.sleep(BROWSER_START_RETRY_SEC)
@@ -598,7 +608,6 @@ async def start_browser() -> Any:
 
 
 async def _run_account(
-    _browser: Any,
     token: str,
     bot_ids: list[str],
     account_id: str,
@@ -639,12 +648,11 @@ async def _run_account(
                 await asyncio.sleep(DELAY_BETWEEN_BOTS_SEC)
         return results
     finally:
-        browser.stop()
+        await close_browser(browser)
         await asyncio.sleep(1)
 
 
 async def process_account(
-    browser: Any,
     token: str,
     bot_ids: list[str],
     index: int,
@@ -665,7 +673,7 @@ async def process_account(
             await asyncio.sleep(RETRY_DELAY_SEC)
         try:
             attempt_results = await _run_account(
-                browser, token, pending, account_id, account_cookies
+                token, pending, account_id, account_cookies
             )
         except Exception as exc:
             if isinstance(exc, BrowserStartupError):
@@ -680,6 +688,8 @@ async def process_account(
             }
             dbg(f"Account attempt failed: {type(exc).__name__}")
             print(f"{prefix} ❌ Attempt {attempt} failed: {detail}")
+            if isinstance(exc, BrowserStartupError):
+                break
             continue
 
         if attempt_results and attempt_results[0].get("bot_id") == "all":
@@ -751,7 +761,7 @@ async def main() -> int:
     all_results = []
     for index, token in enumerate(tokens, 1):
         cookies = all_cookies[index - 1] if index <= len(all_cookies) else []
-        results = await process_account(None, token, bot_ids, index, total, cookies)
+        results = await process_account(token, bot_ids, index, total, cookies)
         all_results.append(results)
         if index < total:
             await asyncio.sleep(DELAY_BETWEEN_ACCOUNTS_SEC)

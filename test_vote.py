@@ -167,11 +167,11 @@ class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             [{"bot_id": "222", "status": "cooldown", "detail": "done", "account_id": "id"}],
         ]
 
-        results = await vote.process_account(object(), "token", ["111", "222"], 1, 1)
+        results = await vote.process_account("token", ["111", "222"], 1, 1)
 
         self.assertEqual([result["status"] for result in results], ["success", "cooldown"])
-        self.assertEqual(run_account.await_args_list[0].args[2], ["111", "222"])
-        self.assertEqual(run_account.await_args_list[1].args[2], ["222"])
+        self.assertEqual(run_account.await_args_list[0].args[1], ["111", "222"])
+        self.assertEqual(run_account.await_args_list[1].args[1], ["222"])
 
     @patch("builtins.print")
     @patch("vote.asyncio.sleep", new_callable=AsyncMock)
@@ -182,7 +182,7 @@ class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             [{"bot_id": "111", "status": "success", "detail": "ok", "account_id": "id"}],
         ]
 
-        results = await vote.process_account(object(), "token", ["111"], 1, 1)
+        results = await vote.process_account("token", ["111"], 1, 1)
 
         self.assertEqual(results[0]["status"], "success")
         self.assertEqual(run_account.await_count, 2)
@@ -195,9 +195,22 @@ class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             {"bot_id": "all", "status": "captcha_required", "detail": "captcha", "account_id": "id"}
         ]
 
-        results = await vote.process_account(object(), "token", ["111"], 1, 1)
+        results = await vote.process_account("token", ["111"], 1, 1)
 
         self.assertEqual(results[0]["status"], "captcha_required")
+        self.assertEqual(run_account.await_count, 1)
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote._run_account", new_callable=AsyncMock)
+    async def test_browser_startup_error_is_not_multiplied_by_account_retry(
+        self, run_account, _sleep, _print
+    ):
+        run_account.side_effect = vote.BrowserStartupError("failed")
+
+        results = await vote.process_account("token", ["111"], 1, 1)
+
+        self.assertEqual(results[0]["status"], "error")
         self.assertEqual(run_account.await_count, 1)
 
 
@@ -225,15 +238,18 @@ class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
         browser = MagicMock()
         browser.__iter__.return_value = iter([AsyncMock()])
         browser.cookies.clear = AsyncMock()
+        browser.aclose = AsyncMock()
         start_browser.return_value = browser
         cookie_login.return_value = vote.AUTH_INVALID
         oauth_login.return_value = vote.AUTHENTICATED
         vote_for_bot.return_value = {"bot_id": "111", "status": "success", "detail": "ok"}
 
-        results = await vote._run_account(None, "token", ["111"], "id", [{"name": "authjs"}])
+        results = await vote._run_account("token", ["111"], "id", [{"name": "authjs"}])
 
         self.assertEqual(results[0]["status"], "success")
         oauth_login.assert_awaited_once()
+        browser.aclose.assert_awaited_once()
+        browser.stop.assert_called_once()
 
 
 class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):
