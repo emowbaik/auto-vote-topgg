@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import vote
 
@@ -148,6 +148,54 @@ class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(results[0]["status"], "success")
         self.assertEqual(run_account.await_count, 2)
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote._run_account", new_callable=AsyncMock)
+    async def test_auth_captcha_is_not_retried(self, run_account, _sleep, _print):
+        run_account.return_value = [
+            {"bot_id": "all", "status": "captcha_required", "detail": "captcha", "account_id": "id"}
+        ]
+
+        results = await vote.process_account(object(), "token", ["111"], 1, 1)
+
+        self.assertEqual(results[0]["status"], "captcha_required")
+        self.assertEqual(run_account.await_count, 1)
+
+
+class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.topgg_auth_state", new_callable=AsyncMock)
+    @patch("vote.inject_topgg_cookies", new_callable=AsyncMock)
+    async def test_cookie_auth_propagates_captcha(self, _inject, auth_state, _sleep, _print):
+        auth_state.return_value = vote.AUTH_CAPTCHA_REQUIRED
+        tab = AsyncMock()
+
+        result = await vote.login_with_cookies(tab, [{"name": "authjs"}], ["111"])
+
+        self.assertEqual(result, vote.AUTH_CAPTCHA_REQUIRED)
+
+    @patch("builtins.print")
+    @patch("vote.vote_for_bot", new_callable=AsyncMock)
+    @patch("vote.discord_oauth_login", new_callable=AsyncMock)
+    @patch("vote.login_with_cookies", new_callable=AsyncMock)
+    @patch("vote.start_browser", new_callable=AsyncMock)
+    async def test_invalid_cookie_falls_back_to_oauth(
+        self, start_browser, cookie_login, oauth_login, vote_for_bot, _print
+    ):
+        browser = MagicMock()
+        browser.__iter__.return_value = iter([AsyncMock()])
+        browser.cookies.clear = AsyncMock()
+        start_browser.return_value = browser
+        cookie_login.return_value = vote.AUTH_INVALID
+        oauth_login.return_value = vote.AUTHENTICATED
+        vote_for_bot.return_value = {"bot_id": "111", "status": "success", "detail": "ok"}
+
+        results = await vote._run_account(None, "token", ["111"], "id", [{"name": "authjs"}])
+
+        self.assertEqual(results[0]["status"], "success")
+        oauth_login.assert_awaited_once()
 
 
 class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):

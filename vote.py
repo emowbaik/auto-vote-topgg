@@ -27,6 +27,9 @@ FINAL_STATUSES = frozenset({"success", "cooldown", "captcha_required"})
 TRANSIENT_STATUSES = frozenset({"error", "auth_failed", "uncertain"})
 BROWSER_START_RETRIES = 5
 BROWSER_START_RETRY_SEC = 2
+AUTHENTICATED = "authenticated"
+AUTH_INVALID = "invalid"
+AUTH_CAPTCHA_REQUIRED = "captcha_required"
 
 
 class BrowserStartupError(RuntimeError):
@@ -300,28 +303,47 @@ async def is_topgg_authenticated(tab: Any) -> bool:
     return bool(result)
 
 
-async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) -> bool:
+async def topgg_auth_state(tab: Any) -> str:
+    if await is_topgg_authenticated(tab):
+        return AUTHENTICATED
+    if await is_turnstile_present(tab):
+        if not await solve_turnstile(tab):
+            return AUTH_CAPTCHA_REQUIRED
+        await asyncio.sleep(2)
+        if await is_topgg_authenticated(tab):
+            return AUTHENTICATED
+    return AUTH_INVALID
+
+
+async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) -> str:
     if not cookies:
-        return False
+        return AUTH_INVALID
     print("  → Injecting top.gg Auth.js cookies...")
     await inject_topgg_cookies(tab.browser, cookies)
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(3)
-    authenticated = await is_topgg_authenticated(tab)
-    print("  ✅ Authenticated via top.gg cookies" if authenticated else "  ⚠️  Cookie session invalid or expired")
-    return authenticated
+    state = await topgg_auth_state(tab)
+    if state == AUTHENTICATED:
+        print("  ✅ Authenticated via top.gg cookies")
+    elif state == AUTH_CAPTCHA_REQUIRED:
+        print("  🔒 CAPTCHA blocked top.gg cookie authentication")
+    else:
+        print("  ⚠️  Cookie session invalid or expired")
+    return state
 
 
-async def _handle_discord_oauth(tab: Any) -> bool:
+async def _handle_discord_oauth(tab: Any) -> str:
     print("  → Handling Discord OAuth dialog...")
     for attempt in range(12):
         if url_has_domain(await current_url(tab), "top.gg"):
-            return True
+            return AUTHENTICATED
+        if await is_turnstile_present(tab) and not await solve_turnstile(tab):
+            return AUTH_CAPTCHA_REQUIRED
         marker = "data-auto-oauth"
         if await _mark_exact_element(tab, "button", ["Authorize", "Authorise"], marker):
             if await _click_marked(tab, marker):
                 dbg(f"Authorize clicked (attempt {attempt + 1})")
-                return True
+                return AUTHENTICATED
         await evaluate(tab, """(() => {
             const nodes = [...document.querySelectorAll('div')]
                 .filter(el => el.scrollHeight > el.clientHeight);
@@ -330,10 +352,10 @@ async def _handle_discord_oauth(tab: Any) -> bool:
             else window.scrollBy(0, 400);
         })()""")
         await asyncio.sleep(1.5)
-    return False
+    return AUTH_INVALID
 
 
-async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> bool:
+async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
     print("  → Injecting Discord token...")
     await tab.get(DISCORD_LOGIN_URL)
     await asyncio.sleep(2)
@@ -352,33 +374,43 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> bool:
     print("  → Navigating to top.gg to initiate login...")
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(3)
-    if await is_topgg_authenticated(tab):
+    state = await topgg_auth_state(tab)
+    if state == AUTHENTICATED:
         print("  ✅ Already logged into top.gg")
-        return True
+        return state
+    if state == AUTH_CAPTCHA_REQUIRED:
+        return state
 
     marker = "data-auto-login"
     if not await _mark_exact_element(tab, "a,button", ["Login"], marker):
         print("  ❌ Could not find top.gg Login button")
-        return False
+        return AUTH_INVALID
     if not await _click_marked(tab, marker):
         print("  ❌ Could not click top.gg Login button")
-        return False
+        return AUTH_INVALID
     if not await wait_for_domain(tab, "discord.com", TIMEOUT_OAUTH_SEC):
+        if await is_turnstile_present(tab) and not await solve_turnstile(tab):
+            return AUTH_CAPTCHA_REQUIRED
         print("  ❌ Discord OAuth page did not open")
-        return False
+        return AUTH_INVALID
     if "/oauth2/authorize" not in urlparse(await current_url(tab)).path:
         print("  ❌ Unexpected Discord redirect")
-        return False
-    if not await _handle_discord_oauth(tab):
+        return AUTH_INVALID
+    oauth_state = await _handle_discord_oauth(tab)
+    if oauth_state == AUTH_CAPTCHA_REQUIRED:
+        return oauth_state
+    if oauth_state != AUTHENTICATED:
         print("  ❌ Could not authorize top.gg")
-        return False
+        return AUTH_INVALID
     if not await wait_for_domain(tab, "top.gg", TIMEOUT_OAUTH_SEC):
+        if await is_turnstile_present(tab) and not await solve_turnstile(tab):
+            return AUTH_CAPTCHA_REQUIRED
         print("  ❌ OAuth redirect failed")
-        return False
+        return AUTH_INVALID
     await asyncio.sleep(3)
-    authenticated = await is_topgg_authenticated(tab)
-    print("  ✅ Logged into top.gg" if authenticated else "  ❌ top.gg session not established")
-    return authenticated
+    state = await topgg_auth_state(tab)
+    print("  ✅ Logged into top.gg" if state == AUTHENTICATED else "  ❌ top.gg session not established")
+    return state
 
 
 async def is_turnstile_present(tab: Any) -> bool:
@@ -386,10 +418,13 @@ async def is_turnstile_present(tab: Any) -> bool:
         const body = document.body ? document.body.innerText.toLowerCase() : '';
         if (body.includes('verify you are human') ||
             body.includes('please solve the captcha to continue') ||
+            body.includes('complete the captcha') ||
             body.includes('let us know you are human')) return true;
         if (document.querySelector('iframe[src*="challenges.cloudflare.com"]')) return true;
+        if (document.querySelector('iframe[src*="hcaptcha.com"]')) return true;
+        if (document.querySelector('iframe[src*="recaptcha"]')) return true;
         if (document.querySelector('input[name="cf-turnstile-response"]')) return true;
-        return Boolean(document.querySelector('.cf-turnstile'));
+        return Boolean(document.querySelector('.cf-turnstile, .h-captcha, .g-recaptcha'));
     })()"""))
 
 
@@ -573,15 +608,22 @@ async def _run_account(
     tab = next(iter(browser))
     results = []
     try:
-        authenticated = False
+        auth_state = AUTH_INVALID
         if account_cookies:
-            authenticated = await login_with_cookies(tab, account_cookies, bot_ids)
-            if not authenticated:
+            auth_state = await login_with_cookies(tab, account_cookies, bot_ids)
+            if auth_state == AUTH_INVALID:
                 print("  → Cookie auth failed, falling back to Discord OAuth...")
                 await browser.cookies.clear()
-        if not authenticated:
-            authenticated = await discord_oauth_login(tab, token, bot_ids)
-        if not authenticated:
+        if auth_state == AUTH_INVALID:
+            auth_state = await discord_oauth_login(tab, token, bot_ids)
+        if auth_state == AUTH_CAPTCHA_REQUIRED:
+            return [{
+                "bot_id": "all",
+                "status": "captcha_required",
+                "detail": "CAPTCHA blocked authentication",
+                "account_id": account_id,
+            }]
+        if auth_state != AUTHENTICATED:
             return [{
                 "bot_id": "all",
                 "status": "auth_failed",
@@ -642,6 +684,9 @@ async def process_account(
 
         if attempt_results and attempt_results[0].get("bot_id") == "all":
             last_account_error = attempt_results[0]
+            if not is_retryable_result(last_account_error):
+                print(f"{prefix} 🔒 Authentication requires manual CAPTCHA")
+                return attempt_results
             print(f"{prefix} ❌ Authentication attempt {attempt} failed")
             continue
         for result in attempt_results:
