@@ -31,6 +31,7 @@ BROWSER_START_RETRY_SEC = 2
 AUTHENTICATED = "authenticated"
 AUTH_INVALID = "invalid"
 AUTH_CAPTCHA_REQUIRED = "captcha_required"
+TELEGRAM_MESSAGE_LIMIT = 3500
 
 
 class BrowserStartupError(RuntimeError):
@@ -135,37 +136,70 @@ def retryable_bot_ids(results: list[dict]) -> list[str]:
     ]
 
 
-def _normalize_cookie(cookie: dict) -> dict:
+def _normalize_cookie(cookie: dict, line_number: int = 0) -> dict:
+    prefix = f"TOPGG_COOKIES_JSON line {line_number}" if line_number else "Cookie"
+    name = cookie.get("name")
+    value = cookie.get("value")
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"{prefix} Auth.js cookie requires a non-empty name")
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{prefix} Auth.js cookie {name!r} requires a non-empty value")
+
+    domain = cookie.get("domain", ".top.gg")
+    path = cookie.get("path", "/")
+    if not isinstance(domain, str) or domain.lower() not in {"top.gg", ".top.gg"}:
+        raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid domain")
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid path")
+    for field in ("secure", "httpOnly"):
+        if field in cookie and not isinstance(cookie[field], bool):
+            raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid {field}")
+
     normalized = {
-        "name": str(cookie["name"]),
-        "value": str(cookie["value"]),
-        "domain": str(cookie.get("domain", ".top.gg")),
-        "path": str(cookie.get("path", "/")),
-        "secure": bool(cookie.get("secure", True)),
-        "httpOnly": bool(cookie.get("httpOnly", False)),
+        "name": name,
+        "value": value,
+        "domain": domain.lower(),
+        "path": path,
+        "secure": cookie.get("secure", True),
+        "httpOnly": cookie.get("httpOnly", False),
     }
     expiration = cookie.get("expirationDate", cookie.get("expires"))
-    if expiration and float(expiration) > 0:
-        normalized["expires"] = float(expiration)
-    same_site = str(cookie.get("sameSite", "Lax")).lower()
-    normalized["sameSite"] = {
+    if expiration is not None:
+        if isinstance(expiration, bool) or not isinstance(expiration, (int, float)):
+            raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid expiry")
+        if expiration > 0:
+            normalized["expires"] = float(expiration)
+    raw_same_site = cookie.get("sameSite", "Lax")
+    same_site = "unspecified" if raw_same_site is None else str(raw_same_site).lower()
+    same_site_map = {
         "lax": "Lax",
         "strict": "Strict",
         "none": "None",
         "no_restriction": "None",
         "unspecified": "Lax",
-    }.get(same_site, "Lax")
+    }
+    if same_site not in same_site_map:
+        raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid sameSite")
+    normalized["sameSite"] = same_site_map[same_site]
     return normalized
 
 
-def load_topgg_cookies() -> list[list[dict]]:
+def load_topgg_cookies(expected_accounts: int | None = None) -> list[list[dict]]:
     raw = os.environ.get("TOPGG_COOKIES_JSON", "")
     if not raw.strip():
         return []
+    lines = raw.strip("\r\n").splitlines()
+    if expected_accounts is not None and len(lines) != expected_accounts:
+        raise ValueError(
+            "TOPGG_COOKIES_JSON line count must match TOKENS; use [] for accounts without cookies"
+        )
+
     account_cookies = []
-    for index, line in enumerate(raw.splitlines(), 1):
-        line = line.strip()
-        if not line or line == "[]":
+    for index, raw_line in enumerate(lines, 1):
+        line = raw_line.strip()
+        if not line:
+            raise ValueError(f"TOPGG_COOKIES_JSON line {index} is blank; use [] instead")
+        if line == "[]":
             account_cookies.append([])
             continue
         try:
@@ -174,32 +208,70 @@ def load_topgg_cookies() -> list[list[dict]]:
             raise ValueError(f"Invalid TOPGG_COOKIES_JSON at line {index}") from exc
         if not isinstance(cookies, list):
             raise ValueError(f"TOPGG_COOKIES_JSON line {index} must be a JSON array")
-        account_cookies.append([
-            _normalize_cookie(cookie)
-            for cookie in cookies
-            if cookie.get("domain") in {"top.gg", ".top.gg"}
-            and "authjs" in str(cookie.get("name", "")).lower()
-        ])
+
+        authjs = []
+        for item_index, cookie in enumerate(cookies, 1):
+            if not isinstance(cookie, dict):
+                raise ValueError(
+                    f"TOPGG_COOKIES_JSON line {index} item {item_index} must be an object"
+                )
+            domain = str(cookie.get("domain", "")).lower()
+            name = str(cookie.get("name", ""))
+            if domain in {"top.gg", ".top.gg"} and "authjs" in name.lower():
+                authjs.append(_normalize_cookie(cookie, index))
+        if not authjs:
+            raise ValueError(
+                f"TOPGG_COOKIES_JSON line {index} contains no top.gg Auth.js cookies"
+            )
+        account_cookies.append(authjs)
     return account_cookies
 
 
-def send_notification(message: str) -> None:
+def split_telegram_message(message: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """Split on report lines; hard-split only an individual oversized line."""
+    if not message:
+        return []
+    chunks = []
+    current = ""
+    for line in message.splitlines():
+        pieces = [line[index:index + limit] for index in range(0, len(line), limit)] or [""]
+        for piece in pieces:
+            candidate = f"{current}\n{piece}" if current else piece
+            if len(candidate) <= limit:
+                current = candidate
+            else:
+                chunks.append(current)
+                current = piece
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def send_notification(message: str) -> bool:
     print("\n" + "=" * 45)
     print(message)
     print("=" * 45)
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("ℹ️  TG_BOT_TOKEN / TG_CHAT_ID not set — skip notification.")
-        return
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        print("📨 Telegram notification sent." if response.status_code == 200 else f"⚠️  Notification failed: {response.status_code}")
-    except Exception as exc:
-        dbg(f"Telegram message failed: {type(exc).__name__}")
-        print("⚠️  Notification exception; enable DEBUG for error type.")
+        return False
+    all_sent = True
+    for chunk in split_telegram_message(message):
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+                json={"chat_id": TG_CHAT_ID, "text": chunk, "parse_mode": "HTML"},
+                timeout=10,
+            )
+            all_sent = all_sent and response.status_code == 200
+            if response.status_code != 200:
+                print(f"⚠️  Notification chunk failed: {response.status_code}")
+        except Exception as exc:
+            all_sent = False
+            dbg(f"Telegram message failed: {type(exc).__name__}")
+            print("⚠️  Notification exception; enable DEBUG for error type.")
+    if all_sent:
+        print("📨 Telegram notification sent.")
+    return all_sent
 
 
 async def evaluate(tab: Any, expression: str) -> Any:
@@ -749,7 +821,7 @@ async def main() -> int:
         return 1
 
     bot_ids = load_bot_ids()
-    all_cookies = load_topgg_cookies()
+    all_cookies = load_topgg_cookies(len(tokens))
     now = datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB")
     total = len(tokens)
     print("🚀 auto-vote-dcbot starting")

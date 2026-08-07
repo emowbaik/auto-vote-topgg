@@ -61,6 +61,16 @@ class ReportingTests(unittest.TestCase):
         )
         self.assertIn("🔒 123: Manual CAPTCHA", message)
 
+    def test_short_report_stays_in_one_chunk(self):
+        self.assertEqual(vote.split_telegram_message("line one\nline two", 50), ["line one\nline two"])
+
+    def test_large_report_splits_in_order_under_limit(self):
+        message = "\n".join(f"line-{index}-" + "x" * 30 for index in range(20))
+        chunks = vote.split_telegram_message(message, 100)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 100 for chunk in chunks))
+        self.assertEqual("\n".join(chunks), message)
+
 
 class BusinessResultTests(unittest.TestCase):
     def test_success_and_cooldown_are_completed(self):
@@ -152,6 +162,45 @@ class CookieLoaderTests(unittest.TestCase):
         with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": "[]\nnot-json"}):
             with self.assertRaisesRegex(ValueError, "line 2"):
                 vote.load_topgg_cookies()
+
+    def test_cookie_line_count_must_match_tokens(self):
+        with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": "[]"}):
+            with self.assertRaisesRegex(ValueError, "line count must match TOKENS"):
+                vote.load_topgg_cookies(2)
+
+    def test_blank_cookie_account_requires_placeholder(self):
+        with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": "[]\n\n[]"}):
+            with self.assertRaisesRegex(ValueError, "line 2 is blank"):
+                vote.load_topgg_cookies(3)
+
+    def test_cookie_items_must_be_objects(self):
+        with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": '[null]'}):
+            with self.assertRaisesRegex(ValueError, "item 1 must be an object"):
+                vote.load_topgg_cookies(1)
+
+    def test_cookie_validation_rejects_invalid_expiry_without_value_leak(self):
+        secret_value = "never-print-this-cookie"
+        cookies = [{
+            "domain": ".top.gg",
+            "name": "__Secure-authjs.session-token",
+            "value": secret_value,
+            "expirationDate": "tomorrow",
+        }]
+        with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": json.dumps(cookies)}):
+            with self.assertRaises(ValueError) as context:
+                vote.load_topgg_cookies(1)
+        self.assertIn("invalid expiry", str(context.exception))
+        self.assertNotIn(secret_value, str(context.exception))
+
+    def test_wrong_domain_export_is_rejected(self):
+        cookies = [{
+            "domain": ".example.com",
+            "name": "__Secure-authjs.session-token",
+            "value": "secret",
+        }]
+        with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": json.dumps(cookies)}):
+            with self.assertRaisesRegex(ValueError, "contains no top.gg Auth.js cookies"):
+                vote.load_topgg_cookies(1)
 
 
 class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
