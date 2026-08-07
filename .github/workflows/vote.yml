@@ -36,13 +36,31 @@ jobs:
 
       - name: Run vote
         env:
-          TOKENS:       ${{ secrets.TOKENS }}
-          BOT_IDS:      ${{ secrets.BOT_IDS }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHAT_ID:             ${{ secrets.TG_CHAT_ID }}
-          SEND_ERROR_SCREENSHOTS: ${{ secrets.SEND_ERROR_SCREENSHOTS }}
-          TOPGG_COOKIES_JSON:     ${{ secrets.TOPGG_COOKIES_JSON }}
-        run: xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
+          TOKENS:                    ${{ secrets.TOKENS }}
+          BOT_IDS:                   ${{ secrets.BOT_IDS }}
+          TG_BOT_TOKEN:              ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:                ${{ secrets.TG_CHAT_ID }}
+          SEND_ERROR_SCREENSHOTS:    ${{ secrets.SEND_ERROR_SCREENSHOTS }}
+          TOPGG_COOKIES_JSON:        ${{ secrets.TOPGG_COOKIES_JSON }}
+        run: |
+          secret_dir="$(mktemp -d)"
+          chmod 700 "$secret_dir"
+          trap 'rm -rf "$secret_dir"' EXIT
+          write_secret() {
+            local name="$1"
+            local value="$2"
+            local path="$secret_dir/$name"
+            printf '%s' "$value" > "$path"
+            chmod 600 "$path"
+            printf -v "${name}_FILE" '%s' "$path"
+            export "${name}_FILE"
+          }
+          write_secret TOKENS "$TOKENS"
+          write_secret TOPGG_COOKIES_JSON "$TOPGG_COOKIES_JSON"
+          write_secret TG_BOT_TOKEN "$TG_BOT_TOKEN"
+          write_secret TG_CHAT_ID "$TG_CHAT_ID"
+          unset TOKENS TOPGG_COOKIES_JSON TG_BOT_TOKEN TG_CHAT_ID
+          xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
 
       - name: Clear old workflow runs
         if: always()

@@ -5,9 +5,12 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
+import tempfile
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -37,8 +40,14 @@ TELEGRAM_MESSAGE_LIMIT = 3500
 class BrowserStartupError(RuntimeError):
     """Credential-free nodriver startup failure safe for workflow logs."""
 
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
+
+class BrowserCleanupError(RuntimeError):
+    """Browser process or sensitive profile cleanup failed."""
+
+
+TG_BOT_TOKEN = ""
+TG_CHAT_ID = ""
+SENSITIVE_VALUES: list[str] = []
 DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 SEND_ERROR_SCREENSHOTS = os.environ.get("SEND_ERROR_SCREENSHOTS", "").strip() == "1"
 
@@ -51,16 +60,29 @@ def dbg(msg: str) -> None:
 def safe_exception_detail(exc: Exception) -> str:
     """Redact configured credentials before exposing a short diagnostic."""
     detail = str(exc).replace("\n", " ").strip()
-    secrets = [
-        TG_BOT_TOKEN,
-        TG_CHAT_ID,
-        os.environ.get("TOPGG_COOKIES_JSON", ""),
-        *load_tokens(),
-    ]
-    for secret in secrets:
+    for secret in SENSITIVE_VALUES:
         if secret:
             detail = detail.replace(secret, "***")
     return detail[:200] or "no detail"
+
+
+def consume_secret(name: str) -> str:
+    """Read a secret once, unlink its file, and remove all environment references."""
+    file_path = os.environ.pop(f"{name}_FILE", "").strip()
+    env_value = os.environ.pop(name, "")
+    if not file_path:
+        return env_value
+    path = Path(file_path)
+    try:
+        return path.read_text(encoding="utf-8")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def scrub_browser_environment() -> None:
+    for name in ("TOKENS", "TOPGG_COOKIES_JSON", "TG_BOT_TOKEN", "TG_CHAT_ID"):
+        os.environ.pop(name, None)
+        os.environ.pop(f"{name}_FILE", None)
 
 
 async def error_screenshot(tab: Any, path: str) -> str | None:
@@ -100,8 +122,10 @@ async def notify_error_screenshot(bot_id: str, path: str, detail: str) -> None:
     print("  📸 Error screenshot sent to Telegram" if sent else "  ⚠️  Could not send error screenshot to Telegram")
 
 
-def load_tokens() -> list[str]:
-    raw = os.environ.get("TOKENS", "").strip()
+def load_tokens(raw: str | None = None) -> list[str]:
+    if raw is None:
+        raw = os.environ.get("TOKENS", "")
+    raw = raw.strip()
     return [line.strip() for line in raw.splitlines() if line.strip()] if raw else []
 
 
@@ -178,8 +202,12 @@ def _normalize_cookie(cookie: dict, line_number: int = 0) -> dict:
     return normalized
 
 
-def load_topgg_cookies(expected_accounts: int | None = None) -> list[list[dict]]:
-    raw = os.environ.get("TOPGG_COOKIES_JSON", "")
+def load_topgg_cookies(
+    expected_accounts: int | None = None,
+    raw: str | None = None,
+) -> list[list[dict]]:
+    if raw is None:
+        raw = os.environ.get("TOPGG_COOKIES_JSON", "")
     if not raw.strip():
         return []
     lines = raw.strip("\r\n").splitlines()
@@ -628,16 +656,37 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
 async def close_browser(browser: Any) -> None:
     if browser is None:
         return
+    process = getattr(browser, "_process", None)
     with suppress(Exception):
         await browser.aclose()
     with suppress(Exception):
         browser.stop()
+    if process is not None and getattr(process, "returncode", None) is None:
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            with suppress(Exception):
+                process.kill()
+            with suppress(Exception):
+                await process.wait()
+            raise BrowserCleanupError("Chrome process did not terminate cleanly") from exc
+    profile_path = getattr(browser, "_security_profile_path", None)
+    if isinstance(profile_path, (str, os.PathLike)):
+        try:
+            shutil.rmtree(profile_path)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            raise BrowserCleanupError("Sensitive browser profile could not be deleted") from exc
 
 
 async def start_browser() -> Any:
     last_error = None
+    scrub_browser_environment()
     for attempt in range(1, BROWSER_START_RETRIES + 1):
+        profile_path = tempfile.mkdtemp(prefix="auto-vote-topgg-")
         config = uc.Config(
+            user_data_dir=profile_path,
             headless=False,
             sandbox=True,
             browser_executable_path=os.environ.get("CHROME_BIN") or None,
@@ -649,6 +698,7 @@ async def start_browser() -> Any:
             ],
         )
         browser = uc.Browser(config)
+        browser._security_profile_path = profile_path
         try:
             await browser.start()
             await browser.get("about:blank")
@@ -800,13 +850,26 @@ def has_business_failure(all_results: list[list[dict]]) -> bool:
 
 
 async def main() -> int:
-    tokens = load_tokens()
+    global TG_BOT_TOKEN, TG_CHAT_ID, SENSITIVE_VALUES
+    tokens_raw = consume_secret("TOKENS")
+    cookies_raw = consume_secret("TOPGG_COOKIES_JSON")
+    TG_BOT_TOKEN = consume_secret("TG_BOT_TOKEN").strip()
+    TG_CHAT_ID = consume_secret("TG_CHAT_ID").strip()
+    tokens = load_tokens(tokens_raw)
+    SENSITIVE_VALUES = [
+        tokens_raw,
+        cookies_raw,
+        TG_BOT_TOKEN,
+        TG_CHAT_ID,
+        *tokens,
+    ]
+    scrub_browser_environment()
     if not tokens:
         print("❌ No tokens found.\n   Set TOKENS secret (one Discord user token per line).")
         return 1
 
     bot_ids = load_bot_ids()
-    all_cookies = load_topgg_cookies(len(tokens))
+    all_cookies = load_topgg_cookies(len(tokens), cookies_raw)
     now = datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB")
     total = len(tokens)
     print("🚀 auto-vote-dcbot starting")
