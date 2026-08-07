@@ -12,6 +12,26 @@ class LoaderTests(unittest.TestCase):
         with patch.dict(os.environ, {"TOKENS": "first\n\n second \n"}):
             self.assertEqual(vote.load_tokens(), ["first", "second"])
 
+    def test_consume_secret_file_unlinks_and_scrubs_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "secret")
+            with open(path, "w", encoding="utf-8") as file:
+                file.write("sensitive-value")
+            with patch.dict(
+                os.environ,
+                {"TOKENS": "fallback", "TOKENS_FILE": path},
+                clear=False,
+            ):
+                self.assertEqual(vote.consume_secret("TOKENS"), "sensitive-value")
+                self.assertNotIn("TOKENS", os.environ)
+                self.assertNotIn("TOKENS_FILE", os.environ)
+            self.assertFalse(os.path.exists(path))
+
+    def test_consume_secret_environment_fallback_is_removed(self):
+        with patch.dict(os.environ, {"TOKENS": "sensitive-value"}, clear=False):
+            self.assertEqual(vote.consume_secret("TOKENS"), "sensitive-value")
+            self.assertNotIn("TOKENS", os.environ)
+
     def test_load_bot_ids_accepts_discord_snowflakes(self):
         with patch.dict(os.environ, {"BOT_IDS": "830530156048285716\n12345678901234567"}):
             self.assertEqual(vote.load_bot_ids(), ["830530156048285716", "12345678901234567"])
@@ -91,6 +111,7 @@ class BusinessResultTests(unittest.TestCase):
 
 
 class MainExitTests(unittest.IsolatedAsyncioTestCase):
+    @patch("vote.consume_secret")
     @patch("builtins.print")
     @patch("vote.send_notification")
     @patch("vote.process_account", new_callable=AsyncMock)
@@ -98,8 +119,10 @@ class MainExitTests(unittest.IsolatedAsyncioTestCase):
     @patch("vote.load_bot_ids", return_value=["111"])
     @patch("vote.load_tokens", return_value=["token"])
     async def test_main_notifies_before_returning_failure(
-        self, _tokens, _bots, _cookies, process_account, send_notification, _print
+        self, _tokens, _bots, _cookies, process_account, send_notification, _print,
+        consume_secret,
     ):
+        consume_secret.side_effect = ["token", "", "", ""]
         process_account.return_value = [
             {"account_id": "id", "bot_id": "111", "status": "captcha_required", "detail": "captcha"}
         ]
@@ -139,11 +162,25 @@ class RetryPolicyTests(unittest.TestCase):
 class CookieLoaderTests(unittest.TestCase):
     def test_cookie_lines_match_accounts_and_filter_non_authjs(self):
         first = [
-            {"domain": ".top.gg", "name": "__Secure-authjs.session-token", "value": "one", "sameSite": "lax"},
+            {
+                "domain": ".top.gg",
+                "name": "__Secure-authjs.session-token",
+                "value": "one",
+                "sameSite": "lax",
+                "secure": True,
+                "httpOnly": True,
+            },
             {"domain": ".top.gg", "name": "_ga", "value": "tracking"},
         ]
         second = [
-            {"domain": "top.gg", "name": "__Host-authjs.csrf-token", "value": "two", "sameSite": "no_restriction"},
+            {
+                "domain": "top.gg",
+                "name": "__Host-authjs.csrf-token",
+                "value": "two",
+                "sameSite": "no_restriction",
+                "secure": True,
+                "httpOnly": False,
+            },
         ]
         raw = f"{json.dumps(first)}\n[]\n{json.dumps(second)}"
         with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": raw}):
@@ -184,6 +221,8 @@ class CookieLoaderTests(unittest.TestCase):
             "domain": ".top.gg",
             "name": "__Secure-authjs.session-token",
             "value": secret_value,
+            "secure": True,
+            "httpOnly": True,
             "expirationDate": "tomorrow",
         }]
         with patch.dict(os.environ, {"TOPGG_COOKIES_JSON": json.dumps(cookies)}):
@@ -191,6 +230,40 @@ class CookieLoaderTests(unittest.TestCase):
                 vote.load_topgg_cookies(1)
         self.assertIn("invalid expiry", str(context.exception))
         self.assertNotIn(secret_value, str(context.exception))
+
+    def test_authjs_cookie_requires_secure_attribute_without_value_leak(self):
+        secret_value = "never-print-this-cookie"
+        for secure in (None, False):
+            cookie = {
+                "domain": ".top.gg",
+                "name": "authjs.csrf-token",
+                "value": secret_value,
+                "httpOnly": False,
+            }
+            if secure is not None:
+                cookie["secure"] = secure
+            with self.subTest(secure=secure):
+                with self.assertRaises(ValueError) as context:
+                    vote.load_topgg_cookies(1, json.dumps([cookie]))
+                self.assertIn("must be Secure", str(context.exception))
+                self.assertNotIn(secret_value, str(context.exception))
+
+    def test_session_cookie_requires_httponly_without_value_leak(self):
+        secret_value = "never-print-this-cookie"
+        for http_only in (None, False):
+            cookie = {
+                "domain": ".top.gg",
+                "name": "__Secure-authjs.session-token",
+                "value": secret_value,
+                "secure": True,
+            }
+            if http_only is not None:
+                cookie["httpOnly"] = http_only
+            with self.subTest(httpOnly=http_only):
+                with self.assertRaises(ValueError) as context:
+                    vote.load_topgg_cookies(1, json.dumps([cookie]))
+                self.assertIn("must be HttpOnly", str(context.exception))
+                self.assertNotIn(secret_value, str(context.exception))
 
     def test_wrong_domain_export_is_rejected(self):
         cookies = [{
@@ -307,15 +380,40 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
     @patch("vote.uc.Browser")
     @patch("vote.uc.Config")
     async def test_partial_start_failure_is_cleaned(
-        self, _config, browser_class, _sleep
+        self, config_class, browser_class, _sleep
     ):
         browser = browser_class.return_value
         browser.start = AsyncMock(side_effect=RuntimeError("connect failed"))
         browser.aclose = AsyncMock()
+        with patch.dict(
+            os.environ,
+            {
+                "TOKENS": "token",
+                "TOPGG_COOKIES_JSON": "cookies",
+                "TG_BOT_TOKEN": "telegram",
+                "TG_CHAT_ID": "chat",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(vote.BrowserStartupError):
+                await vote.start_browser()
+            for name in ("TOKENS", "TOPGG_COOKIES_JSON", "TG_BOT_TOKEN", "TG_CHAT_ID"):
+                self.assertNotIn(name, os.environ)
 
-        with self.assertRaises(vote.BrowserStartupError):
-            await vote.start_browser()
+        profile_path = config_class.call_args.kwargs["user_data_dir"]
+        self.assertFalse(os.path.exists(profile_path))
+        browser.aclose.assert_awaited_once()
+        browser.stop.assert_called_once()
 
+    async def test_close_browser_deletes_explicit_profile(self):
+        browser = MagicMock()
+        browser.aclose = AsyncMock()
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path = os.path.join(directory, "profile")
+            os.mkdir(profile_path)
+            browser._security_profile_path = profile_path
+            await vote.close_browser(browser)
+            self.assertFalse(os.path.exists(profile_path))
         browser.aclose.assert_awaited_once()
         browser.stop.assert_called_once()
 
@@ -335,6 +433,7 @@ class FullOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
+            patch("vote.consume_secret", side_effect=["token", "cookies", "", ""]),
             patch("vote.load_tokens", return_value=["token"]),
             patch("vote.load_bot_ids", return_value=["111"]),
             patch("vote.load_topgg_cookies", return_value=account_cookies),

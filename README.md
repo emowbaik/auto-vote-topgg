@@ -89,7 +89,7 @@ OTQxNjM3NDU4MjcxMDA2NDAz.XXXXXX.ZZZZZZZZZZZZ
 []
 ```
 
-The script filters the full export automatically and injects only cookie names containing `authjs` for `top.gg`. When this secret exists, its line count must exactly match `TOKENS`; use `[]` for any account without cookies. Invalid/misaligned exports fail before browser startup without printing cookie values.
+The script filters full export automatically and injects only cookie names containing `authjs` for `top.gg`. When this secret exists, its line count must exactly match `TOKENS`; use `[]` for any account without cookies. Every injected Auth.js cookie must export `secure: true`; session-token cookies must also export `httpOnly: true`. Invalid/misaligned exports fail before browser startup without printing cookie values.
 
 > [!CAUTION]
 > Auth.js session cookies are login credentials. Store them only in GitHub Secrets; never commit or share them.
@@ -135,7 +135,10 @@ DEBUG=1 python vote.py
 
 Error screenshots remain disabled unless `SEND_ERROR_SCREENSHOTS=1` is set.
 
-For GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error, uncertain, and CAPTCHA states will send screenshots to the configured Telegram chat. Keep that chat private: screenshots may contain Discord username, avatar, or top.gg account details. Without this secret, workflow screenshots remain disabled.
+For GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error, uncertain, and CAPTCHA states send screenshots to configured Telegram chat. Keep chat private: screenshots may contain Discord username, avatar, or top.gg account details. Without this secret, workflow screenshots remain disabled.
+
+> [!WARNING]
+> Use ephemeral, single-tenant GitHub-hosted runners only. Do not run this project on persistent/shared self-hosted runners: browser processes handle live account credentials and temporary profiles.
 
 Transient authentication/browser failures retry up to 3 times. In multi-bot runs, only bots with `error` or `uncertain` results retry; `success`, `cooldown`, and `captcha_required` are final for the current run. Interactive CAPTCHA is intentionally not retried on the same runner/IP. Telegram reports identify accounts using a short SHA-256 fingerprint, never token fragments, and split automatically below Telegram's message limit.
 
@@ -146,19 +149,42 @@ Only `success` and `cooldown` count as completed business outcomes. `error`, `au
 ```
 auto-vote-topgg/
 ├── vote.py                          # Main voting script
-├── requirements.txt                 # Python dependencies
+├── requirements.txt                 # Direct Python dependencies
+├── requirements.lock                # Linux/Python 3.11 hashes and transitive pins
+├── audit_dependencies.py            # Stdlib OSV dependency audit
+├── SECURITY.md                      # Disclosure and credential policy
 ├── .github/
+│   ├── CODEOWNERS
+│   ├── dependabot.yml
 │   └── workflows/
-│       └── vote.yml                 # GitHub Actions schedule & job
+│       ├── security.yml              # Unit and dependency security checks
+│       └── vote.yml                  # GitHub Actions schedule and job
 └── .gitignore
 ```
 
 ## Requirements
 
 - Python 3.11+
-- `nodriver==0.50.3` + `requests==2.32.5` (pinned in `requirements.txt`)
+- `nodriver==0.50.3` + `requests==2.34.2` as direct dependencies
+- Hash-locked Linux x86_64 / CPython 3.11 dependencies in `requirements.lock`
 - Google Chrome/Chromium (discovered dynamically by workflow)
 - Xvfb on headless Linux runners (installed by workflow)
+
+CI installs dependencies with:
+
+```bash
+python -m pip install --require-hashes -r requirements.lock
+```
+
+Run point-in-time advisory scan with:
+
+```bash
+python audit_dependencies.py requirements.lock
+```
+
+Dependabot checks pip and GitHub Actions weekly. Regenerate lock by downloading CPython 3.11 Linux x86_64 wheels for `requirements.txt`, recording exact transitive versions, and adding each wheel SHA-256. Verify resulting install on GitHub Actions before merging.
+
+`master` is managed through pull requests and required security checks. Direct pushes, force pushes, and branch deletion are blocked after protection is applied.
 
 ## ⚠️ Disclaimer
 
