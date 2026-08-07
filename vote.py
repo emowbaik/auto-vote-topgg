@@ -169,12 +169,9 @@ def _normalize_cookie(cookie: dict, line_number: int = 0) -> dict:
         raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid domain")
     if not isinstance(path, str) or not path.startswith("/"):
         raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid path")
-    if cookie.get("secure") is not True:
-        raise ValueError(f"{prefix} Auth.js cookie {name!r} must be Secure")
-    if "session-token" in name.lower() and cookie.get("httpOnly") is not True:
-        raise ValueError(f"{prefix} Auth.js session cookie {name!r} must be HttpOnly")
-    if "httpOnly" in cookie and not isinstance(cookie["httpOnly"], bool):
-        raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid httpOnly")
+    for field in ("secure", "httpOnly"):
+        if field in cookie and not isinstance(cookie[field], bool):
+            raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid {field}")
 
     normalized = {
         "name": name,
@@ -182,7 +179,7 @@ def _normalize_cookie(cookie: dict, line_number: int = 0) -> dict:
         "domain": domain.lower(),
         "path": path,
         "secure": True,
-        "httpOnly": cookie.get("httpOnly", False),
+        "httpOnly": "session-token" in name.lower() or cookie.get("httpOnly", False),
     }
     expiration = cookie.get("expirationDate", cookie.get("expires"))
     if expiration is not None:
