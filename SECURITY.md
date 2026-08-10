@@ -33,9 +33,15 @@ Workflow secrets are handed to Python through mode-`0600` temporary files. Pytho
 - Every Auth.js cookie forced to `Secure` during injection.
 - Every Auth.js session-token cookie forced to `HttpOnly` during injection.
 - Credential redaction in normal diagnostics.
-- Separate write-capable workflow cleanup job without user credentials.
+- Separate write-capable cleanup and cooldown-dispatch jobs without user credentials.
+- Cooldown artifacts contain only a bounded UTC epoch; no account IDs, bot IDs, cookies, or tokens.
+- Cooldown dispatcher validates latest-run state, dispatches once, then disables its own schedule.
 
 ## Audit Log
+
+### 2026-08-10
+
+Added credential-free cooldown scheduling with timestamp-only one-day artifacts, bounded input validation, isolated `actions: write`, and single-dispatch lifecycle controls.
 
 ### 2026-08-07
 
