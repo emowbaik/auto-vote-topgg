@@ -149,11 +149,13 @@ jobs:
             gh api --method PUT "$endpoint/enable"
             echo "⏰ Cooldown scheduler enabled for epoch $next_vote_at"
           else
-            gh api --method PUT "$endpoint/disable" || {
-              echo "⚠️ Could not disable cooldown scheduler; fixed schedule remains fallback."
-              exit 1
-            }
-            echo "⏰ No valid cooldown state — scheduler disabled"
+            state="$(gh api "$endpoint" --jq '.state')"
+            if [ "$state" = "active" ]; then
+              gh api --method PUT "$endpoint/disable"
+              echo "⏰ No valid cooldown state — scheduler disabled"
+            else
+              echo "⏰ No valid cooldown state — scheduler already disabled"
+            fi
           fi
 
       - name: Clear old workflow runs
