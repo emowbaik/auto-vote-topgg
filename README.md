@@ -22,7 +22,7 @@ Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible 
 - 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating final results
 - 📸 **Opt-in diagnostics** — optionally sends error/uncertain/CAPTCHA screenshots to a private Telegram chat
 - 🚦 **Truthful CI status** — incomplete votes report to Telegram, then fail the workflow
-- 🧹 **Auto-cleanup** — keeps the latest 10 GitHub Actions runs for debugging
+- 🧹 **Auto-cleanup** — keeps the latest 10 completed GitHub Actions runs repository-wide
 - 📌 **Reproducible builds** — Python packages and GitHub Actions are pinned to tested immutable versions
 
 ## How It Works
