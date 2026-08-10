@@ -10,7 +10,8 @@ Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible 
 
 ## Features
 
-- 🗳️ Auto-vote **2× per day** (07:00 & 19:00 WIB) to maximize cooldown cycles
+- 🗳️ Auto-vote **2× per day** (07:00 & 19:00 WIB) as a baseline/fallback
+- ⏱️ **Cooldown-aware retry** — schedules the next workflow near top.gg eligibility
 - 👥 **Multi-account** — vote with multiple Discord tokens and cookie sessions in one run
 - 🤖 **Multi-bot** — vote for multiple bots per account
 - 🍪 **Cookie-first auth** — injects only top.gg Auth.js cookies, then verifies the session
@@ -35,6 +36,7 @@ TOPGG_COOKIES_JSON (same line order as TOKENS)
 top.gg authenticated
     ↓ navigate to vote page → wait ad → nodriver verify_cf()
     ├── interactive CAPTCHA → captcha_required (no retry this run)
+    ├── cooldown text → bounded timestamp → temporary five-minute dispatcher
     └── verified → click Vote → confirm success/cooldown
 ```
 
@@ -114,11 +116,28 @@ The script filters full export automatically and injects only cookie names conta
 
 Go to your repo **Actions** tab → click **"I understand my workflows, go ahead and enable them"**.
 
-The bot will automatically vote at:
-- **07:00 WIB** (00:00 UTC)
-- **19:00 WIB** (12:00 UTC)
+## Automatic Schedule and Cooldown-Aware Retry
 
-You can also trigger manually: **Actions → Top.gg Auto Vote → Run workflow**.
+`vote.yml` still runs twice daily as a baseline:
+
+- **07:00 WIB** (`00:00 UTC`)
+- **19:00 WIB** (`12:00 UTC`)
+
+When top.gg displays cooldown text such as:
+
+```text
+You can vote again in about 1 hour.
+```
+
+`vote.py` parses the duration, adds a five-minute safety buffer because `about` is approximate, and selects the earliest retry across all account/bot combinations. The workflow stores only this private one-day artifact:
+
+```json
+{"next_vote_at": 1786334400}
+```
+
+`cooldown-retry.yml` then activates temporarily and checks the timestamp every five minutes. Once due, it dispatches one `vote.yml` run and disables itself. Practical precision is roughly **target + 5–10 minutes**, plus possible GitHub Actions queue delay.
+
+The artifact and dispatcher job contain no Discord token, top.gg cookie, Telegram token, account ID, or bot ID. Unparseable cooldown text creates no dynamic retry; 07:00/19:00 WIB remains the fallback. If a dynamic run is still early, the new cooldown is parsed and scheduled again.
 
 ### Fork & Scheduled Workflow Protection
 
@@ -129,7 +148,7 @@ To prevent this, the workflow includes a `workflow-keepalive` job that uses [`li
 If your workflow is ever disabled:
 1. Go to **Actions → Top.gg Auto Vote → Enable workflow** (in the GitHub UI).
 2. Make a dummy commit (`git commit --allow-empty -m "keepalive"`) to reset the 60-day timer.
-3. Or add `workflow_dispatch:` to `.github/workflows/vote.yml` (already included) and trigger manually from time to time.
+3. Or trigger manually from time to time via **Actions → Top.gg Auto Vote → Run workflow**.
 
 ## Debugging
 
@@ -152,14 +171,19 @@ For GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`
 
 Transient authentication/browser failures retry up to 3 times. In multi-bot runs, only bots with `error` or `uncertain` results retry; `success`, `cooldown`, and `captcha_required` are final for the current run. Interactive CAPTCHA is intentionally not retried on the same runner/IP. Telegram reports identify accounts using a short SHA-256 fingerprint, never token fragments, and split automatically below Telegram's message limit.
 
-Only `success` and `cooldown` count as completed business outcomes. `error`, `auth_failed`, `uncertain`, or `captcha_required` sends its report first, then exits non-zero so GitHub Actions shows failure.
+- `success`, `cooldown`: final on the current runner/IP.
+- A cooldown with a valid duration schedules an isolated dispatcher instead of sleeping/retrying on the same runner.
+- `captcha_required`: final on the current runner/IP.
+- `error`, `auth_failed`, `uncertain`: retry up to 3 times.
+
+`error`, `auth_failed`, `uncertain`, or `captcha_required` sends its report first, then exits non-zero so GitHub Actions shows failure.
 
 ## Project Structure
 
 ```text
 auto-vote-topgg/
-├── vote.py                          # Auth, vote, retry, report, browser lifecycle
-├── test_vote.py                     # 42 unit/regression tests
+├── vote.py                          # Auth, vote, cooldown state, report, browser lifecycle
+├── test_vote.py                     # 51 unit/regression tests
 ├── audit_dependencies.py            # Stdlib OSV dependency audit
 ├── requirements.txt                 # Direct Python dependencies
 ├── requirements.lock                # Linux/Python 3.11 hashes and transitive pins
@@ -173,6 +197,7 @@ auto-vote-topgg/
 │   ├── dependabot.yml               # Weekly pip/Actions updates
 │   └── workflows/
 │       ├── security.yml             # Tests and dependency audit
+│       ├── cooldown-retry.yml       # Temporary credential-free dispatcher
 │       └── vote.yml                 # Schedule, secret handoff, vote, cleanup
 └── .gitignore
 ```
