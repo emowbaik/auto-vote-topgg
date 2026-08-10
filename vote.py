@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from contextlib import suppress
@@ -35,6 +36,22 @@ AUTHENTICATED = "authenticated"
 AUTH_INVALID = "invalid"
 AUTH_CAPTCHA_REQUIRED = "captcha_required"
 TELEGRAM_MESSAGE_LIMIT = 3500
+COOLDOWN_SAFETY_BUFFER_SEC = 5 * 60
+MIN_COOLDOWN_SEC = 60
+MAX_COOLDOWN_SEC = 24 * 60 * 60
+COOLDOWN_UNITS_SEC = {
+    "second": 1,
+    "minute": 60,
+    "hour": 60 * 60,
+    "day": 24 * 60 * 60,
+}
+COOLDOWN_PATTERN = re.compile(
+    r"(?:you\s+)?can\s+vote\s+again\s+in\s+"
+    r"(?:about\s+|approximately\s+)?"
+    r"(?P<amount>\d+(?:\.\d+)?|a|an|one)\s*"
+    r"(?P<unit>seconds?|minutes?|hours?|days?)\b",
+    re.IGNORECASE,
+)
 
 
 class BrowserStartupError(RuntimeError):
@@ -150,8 +167,70 @@ def retryable_bot_ids(results: list[dict]) -> list[str]:
     return [
         str(result["bot_id"])
         for result in results
-        if is_retryable_result(result) and result.get("bot_id") not in {None, "all"}
+        if result.get("bot_id") not in {None, "all"} and is_retryable_result(result)
     ]
+
+
+def parse_cooldown_seconds(text: str) -> int | None:
+    """Parse bounded top.gg relative cooldown text; reject unrelated durations."""
+    normalized = " ".join(text.split())
+    match = COOLDOWN_PATTERN.search(normalized)
+    if not match:
+        return None
+    amount_text = match.group("amount").lower()
+    amount = 1.0 if amount_text in {"a", "an", "one"} else float(amount_text)
+    unit = match.group("unit").lower().rstrip("s")
+    seconds = round(amount * COOLDOWN_UNITS_SEC[unit])
+    return seconds if MIN_COOLDOWN_SEC <= seconds <= MAX_COOLDOWN_SEC else None
+
+
+def cooldown_retry_at(text: str, now: datetime | None = None) -> int | None:
+    seconds = parse_cooldown_seconds(text)
+    if seconds is None:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return int(current.timestamp()) + seconds + COOLDOWN_SAFETY_BUFFER_SEC
+
+
+def cooldown_result(bot_id: str, text: str, now: datetime | None = None) -> dict:
+    retry_at = cooldown_retry_at(text, now)
+    detail = "Cooldown active"
+    result = {"bot_id": bot_id, "status": "cooldown", "detail": detail}
+    if retry_at is not None:
+        result["retry_at"] = retry_at
+        result["detail"] = f"Cooldown active; retry after {format_retry_at(retry_at)}"
+    return result
+
+
+def earliest_retry_at(all_results: list[list[dict]]) -> int | None:
+    retry_times = [
+        result.get("retry_at")
+        for account_results in all_results
+        for result in account_results
+        if result.get("status") == "cooldown"
+        and isinstance(result.get("retry_at"), int)
+    ]
+    return min(retry_times) if retry_times else None
+
+
+def format_retry_at(retry_at: int) -> str:
+    return datetime.fromtimestamp(retry_at, WIB).strftime("%Y-%m-%d %H:%M WIB")
+
+
+def write_next_vote_state(all_results: list[list[dict]], path_value: str | None = None) -> int | None:
+    path_text = path_value if path_value is not None else os.environ.get("NEXT_VOTE_STATE_FILE", "")
+    retry_at = earliest_retry_at(all_results)
+    if retry_at is None or not path_text.strip():
+        return retry_at
+    path = Path(path_text)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps({"next_vote_at": retry_at}, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return retry_at
 
 
 def _normalize_cookie(cookie: dict, line_number: int = 0) -> dict:
@@ -595,7 +674,7 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
         return {"bot_id": bot_id, "status": "auth_failed", "detail": "Not logged into top.gg"}
     if any(marker in text for marker in ("vote again in", "already voted", "come back", "cooldown")):
         print(f"  ⏳ Already voted for {bot_id} (cooldown)")
-        return {"bot_id": bot_id, "status": "cooldown", "detail": "Cooldown active"}
+        return cooldown_result(bot_id, text)
 
     if await is_turnstile_present(tab) and not await solve_turnstile(tab):
         return await captcha_result(tab, bot_id, "Interactive CAPTCHA requires manual completion")
@@ -888,6 +967,9 @@ async def main() -> int:
 
     print(f"\n{'=' * 45}")
     print(f"📊 Done — {total} account(s) processed")
+    retry_at = write_next_vote_state(all_results)
+    if retry_at is not None:
+        print(f"⏰ Next cooldown retry: {format_retry_at(retry_at)}")
     send_notification(build_notification(all_results, now))
     return 1 if has_business_failure(all_results) else 0
 
