@@ -6,7 +6,17 @@ on:
     - cron: '0 0 * * *'
     # 19:00 WIB = 12:00 UTC
     - cron: '0 12 * * *'
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Trigger source
+        required: false
+        default: manual
+        type: string
+
+concurrency:
+  group: topgg-vote-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   vote:
@@ -14,6 +24,9 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      next_vote_at: ${{ steps.cooldown.outputs.next_vote_at }}
+      vote_status: ${{ steps.run_vote.outputs.status }}
 
     steps:
       - name: Checkout
@@ -36,6 +49,7 @@ jobs:
           echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
 
       - name: Run vote
+        id: run_vote
         env:
           TOKENS:                    ${{ secrets.TOKENS }}
           BOT_IDS:                   ${{ secrets.BOT_IDS }}
@@ -61,16 +75,84 @@ jobs:
           write_secret TG_BOT_TOKEN "$TG_BOT_TOKEN"
           write_secret TG_CHAT_ID "$TG_CHAT_ID"
           unset TOKENS TOPGG_COOKIES_JSON TG_BOT_TOKEN TG_CHAT_ID
+          export NEXT_VOTE_STATE_FILE="$RUNNER_TEMP/next-vote.json"
+          set +e
           xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Read cooldown schedule
+        id: cooldown
+        if: always()
+        env:
+          STATE_FILE: ${{ runner.temp }}/next-vote.json
+        run: |
+          if [ ! -f "$STATE_FILE" ]; then
+            echo "next_vote_at=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          next_vote_at="$(python -c 'import json, os; value=json.load(open(os.environ["STATE_FILE"], encoding="utf-8"))["next_vote_at"]; assert type(value) is int; print(value)')"
+          echo "next_vote_at=$next_vote_at" >> "$GITHUB_OUTPUT"
+
+      - name: Upload cooldown schedule
+        if: steps.cooldown.outputs.next_vote_at != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: next-vote
+          path: ${{ runner.temp }}/next-vote.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Apply vote result
+        if: always()
+        env:
+          STATUS: ${{ steps.run_vote.outputs.status }}
+        run: exit "${STATUS:-1}"
+
+    continue-on-error: true
+
+  verify-vote:
+    needs: vote
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Apply vote result
+        env:
+          VOTE_STATUS: ${{ needs.vote.outputs.vote_status }}
+        run: test "$VOTE_STATUS" = "0"
 
   cleanup:
     needs: vote
-    if: always()
+    if: always() && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       actions: write
     steps:
+      - name: Configure cooldown scheduler
+        id: scheduler
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT_VOTE_AT: ${{ needs.vote.outputs.next_vote_at }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          endpoint="repos/$REPOSITORY/actions/workflows/cooldown-retry.yml"
+          if [ -n "$NEXT_VOTE_AT" ]; then
+            gh api --method PUT "$endpoint/enable"
+            echo "⏰ Cooldown scheduler enabled for epoch $NEXT_VOTE_AT"
+          else
+            gh api --method PUT "$endpoint/disable" || {
+              echo "⚠️ Could not disable cooldown scheduler; fixed schedule remains fallback."
+              exit 1
+            }
+            echo "⏰ No valid cooldown state — scheduler disabled"
+          fi
+
       - name: Clear old workflow runs
+        id: old-runs
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -84,6 +166,10 @@ jobs:
             fi
           done
           echo "✅ Cleanup done — latest 10 runs kept."
+
+      - name: Apply cleanup result
+        if: steps.scheduler.outcome != 'success' || steps.old-runs.outcome != 'success'
+        run: exit 1
 
   # Prevent GitHub from disabling scheduled workflows due to 60-day inactivity
   # Runs only on scheduled triggers (not manual dispatch)
