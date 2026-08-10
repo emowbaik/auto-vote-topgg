@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import vote
@@ -108,6 +109,104 @@ class BusinessResultTests(unittest.TestCase):
     def test_empty_results_fail_workflow(self):
         self.assertTrue(vote.has_business_failure([]))
         self.assertTrue(vote.has_business_failure([[]]))
+
+
+class CooldownSchedulingTests(unittest.TestCase):
+    def test_parses_supplied_about_one_hour_text(self):
+        text = "You have already voted\nYou can vote again in about 1 hour."
+        self.assertEqual(vote.parse_cooldown_seconds(text), 3600)
+
+    def test_parses_supported_units_words_case_and_whitespace(self):
+        cases = {
+            "YOU CAN VOTE AGAIN IN 37 MINUTES.": 2220,
+            "You can vote again in one hour.": 3600,
+            "You can   vote again in an hour.": 3600,
+            "You can vote again in 1 day.": 86400,
+            "You can vote again in 90 seconds.": 90,
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(vote.parse_cooldown_seconds(text), expected)
+
+    def test_rejects_unrelated_malformed_and_out_of_bounds_durations(self):
+        for text in (
+            "Ad ends in 5 minutes",
+            "You can vote again tomorrow",
+            "You can vote again in 0 minutes",
+            "You can vote again in -1 hour",
+            "You can vote again in 25 hours",
+            "You can vote again in 30 seconds",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(vote.parse_cooldown_seconds(text))
+
+    def test_retry_timestamp_includes_safety_buffer(self):
+        now = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
+        retry_at = vote.cooldown_retry_at("You can vote again in about 1 hour", now)
+        self.assertEqual(
+            retry_at,
+            int(now.timestamp()) + 3600 + vote.COOLDOWN_SAFETY_BUFFER_SEC,
+        )
+
+    def test_earliest_retry_is_selected_across_accounts_and_bots(self):
+        results = [
+            [
+                {"status": "cooldown", "retry_at": 300},
+                {"status": "success"},
+            ],
+            [
+                {"status": "cooldown", "retry_at": 200},
+                {"status": "cooldown", "retry_at": "bad"},
+            ],
+        ]
+        self.assertEqual(vote.earliest_retry_at(results), 200)
+
+    def test_state_file_contains_only_numeric_timestamp(self):
+        results = [[{
+            "bot_id": "111",
+            "account_id": "private",
+            "status": "cooldown",
+            "retry_at": 1786334400,
+        }]]
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "next-vote.json")
+            self.assertEqual(vote.write_next_vote_state(results, path), 1786334400)
+            with open(path, encoding="utf-8") as file:
+                self.assertEqual(json.load(file), {"next_vote_at": 1786334400})
+
+    def test_no_state_file_without_parsed_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "next-vote.json")
+            self.assertIsNone(vote.write_next_vote_state([[{"status": "cooldown"}]], path))
+            self.assertFalse(os.path.exists(path))
+
+    def test_cooldown_detail_reports_safe_retry_time(self):
+        now = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
+        result = vote.cooldown_result("111", "You can vote again in 1 hour", now)
+        self.assertEqual(result["status"], "cooldown")
+        self.assertIn("2026-08-10 10:05 WIB", result["detail"])
+        message = vote.build_notification([[{"account_id": "id", **result}]], "now")
+        self.assertIn("retry after 2026-08-10 10:05 WIB", message)
+
+
+class CooldownVotePageTests(unittest.IsolatedAsyncioTestCase):
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.evaluate", new_callable=AsyncMock, return_value="Voting for bot")
+    @patch("vote.body_text", new_callable=AsyncMock)
+    async def test_vote_page_cooldown_returns_retry_metadata(
+        self, body_text, _evaluate, _sleep, _print
+    ):
+        body_text.return_value = (
+            "You have already voted\nYou can vote again in about 1 hour."
+        )
+        tab = AsyncMock()
+
+        result = await vote.vote_for_bot(tab, "111")
+
+        self.assertEqual(result["status"], "cooldown")
+        self.assertIsInstance(result.get("retry_at"), int)
+        tab.get.assert_awaited_once_with("https://top.gg/bot/111/vote")
 
 
 class MainExitTests(unittest.IsolatedAsyncioTestCase):
