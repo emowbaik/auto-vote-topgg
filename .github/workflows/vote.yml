@@ -158,22 +158,22 @@ jobs:
             fi
           fi
 
-      - name: Clear old workflow runs
+      - name: Clear old repository workflow runs
         id: old-runs
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          runs=$(gh run list --repo="${{ github.repository }}" --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          runs="$(gh api --paginate "repos/${{ github.repository }}/actions/runs?per_page=100" --jq '.workflow_runs[] | select(.status == "completed") | .id')"
           count=0
           for run_id in $runs; do
             count=$((count + 1))
             if [ $count -gt 10 ]; then
-              echo "Deleting old run: $run_id"
-              gh run delete --repo="${{ github.repository }}" "$run_id" || true
+              echo "Deleting old completed run: $run_id"
+              gh run delete --repo="${{ github.repository }}" "$run_id"
             fi
           done
-          echo "✅ Cleanup done — latest 10 runs kept."
+          echo "✅ Cleanup done — latest 10 completed repository runs kept."
 
       - name: Apply cleanup result
         if: steps.scheduler.outcome != 'success' || steps.old-runs.outcome != 'success'
