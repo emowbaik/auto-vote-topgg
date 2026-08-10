@@ -89,7 +89,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          runs=$(gh run list --repo="${{ github.repository }}" --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          runs=$(gh run list --repo="${{ github.repository }}" --workflow="cooldown-retry.yml" --limit=100 --json databaseId --jq '.[].databaseId')
           count=0
           for run_id in $runs; do
             count=$((count + 1))
