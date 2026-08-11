@@ -92,6 +92,15 @@ class ReportingTests(unittest.TestCase):
         self.assertTrue(all(len(chunk) <= 100 for chunk in chunks))
         self.assertEqual("\n".join(chunks), message)
 
+    @patch("builtins.print")
+    @patch("vote.requests.post")
+    def test_telegram_report_requires_api_ok(self, post, _print):
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"ok": False}
+        post.return_value = response
+        with patch.object(vote, "TG_BOT_TOKEN", "bot"), patch.object(vote, "TG_CHAT_ID", "chat"):
+            self.assertFalse(vote.send_notification("report"))
+
 
 class BusinessResultTests(unittest.TestCase):
     def test_success_and_cooldown_are_completed(self):
@@ -480,6 +489,32 @@ class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
         browser.aclose.assert_awaited_once()
         browser.stop.assert_called_once()
 
+    @patch("builtins.print")
+    @patch("vote.browser_screenshot", new_callable=AsyncMock)
+    @patch("vote.discord_oauth_login", new_callable=AsyncMock)
+    @patch("vote.login_with_cookies", new_callable=AsyncMock)
+    @patch("vote.start_browser", new_callable=AsyncMock)
+    async def test_auth_captcha_captures_before_browser_cleanup(
+        self, start_browser, cookie_login, oauth_login, screenshot, _print
+    ):
+        browser = MagicMock()
+        tab = AsyncMock()
+        browser.__iter__.return_value = iter([tab])
+        browser.aclose = AsyncMock()
+        start_browser.return_value = browser
+        cookie_login.return_value = vote.AUTH_CAPTCHA_REQUIRED
+        screenshot.return_value = "screenshots/auth_id_captcha.png"
+
+        results = await vote._run_account("token", ["111"], "id", [{"name": "authjs"}])
+
+        self.assertEqual(results[0]["status"], "captcha_required")
+        self.assertEqual(results[0]["screenshot_path"], "screenshots/auth_id_captcha.png")
+        screenshot.assert_awaited_once_with(
+            tab, "screenshots/auth_id_captcha.png", required=True
+        )
+        oauth_login.assert_not_awaited()
+        browser.aclose.assert_awaited_once()
+
 
 class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
     @patch("vote.asyncio.sleep", new_callable=AsyncMock)
@@ -556,11 +591,61 @@ class FullOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exit_code, 1)
         cookie_login.assert_awaited_once()
         oauth_login.assert_awaited_once()
-        vote_for_bot.assert_awaited_once()
+        vote_for_bot.assert_awaited_once_with(unittest.mock.ANY, "111", unittest.mock.ANY)
         send_notification.assert_called_once()
         self.assertIn("CAPTCHA appeared after clicking Vote", send_notification.call_args.args[0])
         browser.aclose.assert_awaited_once()
         browser.stop.assert_called_once()
+
+    @patch("builtins.print")
+    async def test_main_sends_report_before_captcha_photo(self, _print):
+        events = []
+        captcha = {
+            "account_id": "safe-id",
+            "bot_id": "111",
+            "status": "captcha_required",
+            "detail": "CAPTCHA <blocked>",
+            "screenshot_path": "screenshots/captcha.png",
+        }
+
+        def record_report(_message):
+            events.append("report")
+            return True
+
+        async def record_photos(results):
+            self.assertEqual(results, [[captcha]])
+            events.append("photo")
+            return 1
+
+        with (
+            patch("vote.consume_secret", side_effect=["token", "", "telegram", "chat"]),
+            patch("vote.load_tokens", return_value=["token"]),
+            patch("vote.load_bot_ids", return_value=["111"]),
+            patch("vote.load_topgg_cookies", return_value=[]),
+            patch("vote.process_account", new=AsyncMock(return_value=[captcha])),
+            patch("vote.send_notification", side_effect=record_report),
+            patch("vote.send_captcha_screenshots", new=AsyncMock(side_effect=record_photos)),
+        ):
+            exit_code = await vote.main()
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(events, ["report", "photo"])
+
+    @patch("builtins.print")
+    @patch("vote.browser_screenshot", new_callable=AsyncMock, return_value=None)
+    async def test_captcha_capture_failure_preserves_result(self, screenshot, _print):
+        result = await vote.captcha_result(AsyncMock(), "111", "CAPTCHA required")
+
+        self.assertEqual(result, {
+            "bot_id": "111",
+            "status": "captcha_required",
+            "detail": "CAPTCHA required",
+        })
+        screenshot.assert_awaited_once_with(
+            unittest.mock.ANY,
+            "screenshots/vote_unknown_111_captcha.png",
+            required=True,
+        )
 
 
 class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):
@@ -570,6 +655,17 @@ class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await vote.error_screenshot(tab, "screenshots/error.png"))
         tab.save_screenshot.assert_not_awaited()
 
+    @patch.object(vote, "SEND_ERROR_SCREENSHOTS", False)
+    async def test_captcha_screenshot_bypasses_optional_flag(self):
+        tab = AsyncMock()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "captcha.png")
+            self.assertEqual(
+                await vote.browser_screenshot(tab, path, required=True),
+                path,
+            )
+        tab.save_screenshot.assert_awaited_once_with(filename=path, format="png")
+
     @patch.object(vote, "SEND_ERROR_SCREENSHOTS", True)
     async def test_error_screenshot_runs_when_opted_in(self):
         tab = AsyncMock()
@@ -577,6 +673,78 @@ class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):
             path = os.path.join(directory, "error.png")
             self.assertEqual(await vote.error_screenshot(tab, path), path)
         tab.save_screenshot.assert_awaited_once_with(filename=path, format="png")
+
+    @patch("builtins.print")
+    @patch("vote.requests.post")
+    def test_telegram_photo_requires_api_ok(self, post, _print):
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"ok": False}
+        post.return_value = response
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "captcha.png")
+            with open(path, "wb") as file:
+                file.write(b"png")
+            with patch.object(vote, "TG_BOT_TOKEN", "bot"), patch.object(vote, "TG_CHAT_ID", "chat"):
+                self.assertFalse(vote.send_telegram_photo(path, "caption"))
+
+    @patch("builtins.print")
+    @patch("vote.send_telegram_photo", return_value=True)
+    async def test_captcha_photos_are_deduplicated_escaped_and_deleted(self, send_photo, _print):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "captcha.png")
+            with open(path, "wb") as file:
+                file.write(b"png")
+            result = {
+                "account_id": "a&b",
+                "bot_id": "<all>",
+                "status": "captcha_required",
+                "detail": "CAPTCHA <blocked>",
+                "screenshot_path": path,
+            }
+
+            sent = await vote.send_captcha_screenshots([[result, dict(result)]])
+
+            self.assertEqual(sent, 1)
+            self.assertFalse(os.path.exists(path))
+        send_photo.assert_called_once()
+        caption = send_photo.call_args.args[1]
+        self.assertIn("Account a&amp;b", caption)
+        self.assertIn("&lt;all&gt;", caption)
+        self.assertIn("CAPTCHA &lt;blocked&gt;", caption)
+
+    @patch("builtins.print")
+    @patch("vote.send_telegram_photo", return_value=False)
+    async def test_captcha_photo_failure_still_deletes_local_file(self, send_photo, _print):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "captcha.png")
+            with open(path, "wb") as file:
+                file.write(b"png")
+            result = {
+                "status": "captcha_required",
+                "screenshot_path": path,
+            }
+
+            self.assertEqual(await vote.send_captcha_screenshots([[result]]), 0)
+            self.assertFalse(os.path.exists(path))
+        send_photo.assert_called_once()
+
+    @patch("builtins.print")
+    @patch("vote.send_telegram_photo", return_value=True)
+    async def test_captcha_detail_under_generic_error_sends_screenshot(self, send_photo, _print):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "captcha.png")
+            with open(path, "wb") as file:
+                file.write(b"png")
+            result = {
+                "status": "error",
+                "detail": "Unexpected CAPTCHA provider error",
+                "screenshot_path": path,
+            }
+
+            self.assertTrue(vote.is_captcha_related_result(result))
+            self.assertEqual(await vote.send_captcha_screenshots([[result]]), 1)
+            self.assertFalse(os.path.exists(path))
+        send_photo.assert_called_once()
 
 
 if __name__ == "__main__":

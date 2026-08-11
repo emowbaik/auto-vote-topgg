@@ -36,8 +36,15 @@ Workflow secrets are handed to Python through mode-`0600` temporary files. Pytho
 - Separate write-capable cleanup and cooldown-dispatch jobs without user credentials.
 - Cooldown artifacts contain only a bounded UTC epoch; no account IDs, bot IDs, cookies, or tokens.
 - Cooldown dispatcher validates latest-run state, dispatches once, then disables its own schedule.
+- CAPTCHA outcomes capture current browser view before profile cleanup and send it only to configured Telegram chat after the text report.
+- CAPTCHA captions contain account fingerprint, bot ID, and escaped result detail—not tokens or cookies.
+- Screenshot files are never GitHub artifacts and are deleted after every Telegram delivery attempt.
 
 ## Audit Log
+
+### 2026-08-11
+
+Added mandatory CAPTCHA browser screenshots with report-first private Telegram delivery, escaped captions, path deduplication, and local deletion after attempted delivery.
 
 ### 2026-08-10
 
