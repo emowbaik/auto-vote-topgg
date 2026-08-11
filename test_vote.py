@@ -516,6 +516,61 @@ class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
         browser.aclose.assert_awaited_once()
 
 
+class TurnstileSolverTests(unittest.IsolatedAsyncioTestCase):
+    @patch("builtins.print")
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock, return_value=False)
+    @patch("vote.is_turnstile_solved", new_callable=AsyncMock, return_value=False)
+    async def test_no_challenge_succeeds_without_click(self, _solved, _present, _print):
+        tab = AsyncMock()
+
+        self.assertTrue(await vote.solve_turnstile(tab))
+        tab.verify_cf.assert_not_awaited()
+
+    @patch("builtins.print")
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock, return_value=True)
+    @patch("vote.is_turnstile_solved", new_callable=AsyncMock, side_effect=[False, True])
+    async def test_native_click_then_response_token_succeeds(self, _solved, _present, _print):
+        tab = AsyncMock()
+
+        self.assertTrue(await vote.solve_turnstile(tab))
+        tab.verify_cf.assert_awaited_once_with()
+
+    @patch("builtins.print")
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock, side_effect=[True, False])
+    @patch("vote.is_turnstile_solved", new_callable=AsyncMock, return_value=False)
+    async def test_native_click_then_page_clearance_succeeds(self, _solved, _present, _print):
+        tab = AsyncMock()
+
+        self.assertTrue(await vote.solve_turnstile(tab))
+        tab.verify_cf.assert_awaited_once_with()
+
+    @patch("builtins.print")
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock, return_value=True)
+    @patch("vote.is_turnstile_solved", new_callable=AsyncMock, return_value=False)
+    async def test_click_exception_fails_immediately(self, _solved, _present, _print):
+        tab = AsyncMock()
+        tab.verify_cf.side_effect = TypeError("missing template coordinates")
+
+        self.assertFalse(await vote.solve_turnstile(tab))
+        tab.verify_cf.assert_awaited_once_with()
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock, return_value=True)
+    @patch("vote.is_turnstile_solved", new_callable=AsyncMock, return_value=False)
+    async def test_persistent_challenge_times_out(
+        self, _solved, _present, _sleep, _print
+    ):
+        tab = AsyncMock()
+        times = iter([0.0, 0.0, 31.0])
+        loop = MagicMock()
+        loop.time.side_effect = lambda: next(times)
+
+        with patch("vote.asyncio.get_running_loop", return_value=loop):
+            self.assertFalse(await vote.solve_turnstile(tab))
+        tab.verify_cf.assert_awaited_once_with()
+
+
 class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
     @patch("vote.asyncio.sleep", new_callable=AsyncMock)
     @patch.object(vote, "BROWSER_START_RETRIES", 1)

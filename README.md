@@ -16,8 +16,8 @@ Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible 
 - 🤖 **Multi-bot** — vote for multiple bots per account
 - 🍪 **Cookie-first auth** — injects only top.gg Auth.js cookies, then verifies the session
 - 🔐 **OAuth fallback** — uses Discord OAuth when cookies are missing or expired
-- ⚡ **Turnstile verification** — nodriver attempts Cloudflare checkbox verification
-- 🔒 **Explicit CAPTCHA status** — interactive CAPTCHA is reported and not retried on the same runner
+- ⚡ **Turnstile verification** — nodriver clicks Cloudflare checkbox using hash-locked OpenCV template matching
+- 🔒 **Explicit CAPTCHA fallback** — unresolved interactive CAPTCHA is reported and not retried on the same runner
 - 📨 **Telegram notifications** — chunked per-account reports with privacy-safe account fingerprints
 - 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating final results
 - 📸 **CAPTCHA evidence** — always captures CAPTCHA pages for private Telegram; other error screenshots remain opt-in
@@ -35,7 +35,8 @@ TOPGG_COOKIES_JSON (same line order as TOKENS)
     └── invalid/missing → Discord token injection → OAuth Authorize
 top.gg authenticated
     ↓ navigate to vote page → wait ad → nodriver verify_cf()
-    ├── interactive CAPTCHA → captcha_required (no retry this run)
+    ├── checkbox located by OpenCV → native mouse click → response/page clearance
+    ├── unresolved CAPTCHA → captcha_required (no retry this run)
     ├── cooldown text → bounded timestamp → temporary five-minute dispatcher
     └── verified → click Vote → confirm success/cooldown
 ```
@@ -185,7 +186,7 @@ Transient authentication/browser failures retry up to 3 times. In multi-bot runs
 ```text
 auto-vote-topgg/
 ├── vote.py                          # Auth, vote, cooldown state, report, browser lifecycle
-├── test_vote.py                     # 60 unit/regression tests
+├── test_vote.py                     # 65 unit/regression tests
 ├── audit_dependencies.py            # Stdlib OSV dependency audit
 ├── requirements.txt                 # Direct Python dependencies
 ├── requirements.lock                # Linux/Python 3.11 hashes and transitive pins
@@ -207,10 +208,12 @@ auto-vote-topgg/
 ## Requirements
 
 - Python 3.11+
-- `nodriver==0.50.3` + `requests==2.34.2` as direct dependencies
+- `nodriver==0.50.3`, `opencv-python-headless==4.11.0.86`, and `requests==2.34.2` as direct dependencies
 - Hash-locked Linux x86_64 / CPython 3.11 dependencies in `requirements.lock`
 - Google Chrome/Chromium (discovered dynamically by workflow)
 - Xvfb on headless Linux runners (installed by workflow)
+
+`opencv-python-headless` is required by nodriver `verify_cf()`: nodriver captures the viewport, matches its bundled Cloudflare checkbox template, then dispatches a native mouse click. The headless package supplies image matching without OpenCV GUI components.
 
 ### Local install
 
