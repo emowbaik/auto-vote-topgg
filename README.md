@@ -20,7 +20,7 @@ Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible 
 - 🔒 **Explicit CAPTCHA status** — interactive CAPTCHA is reported and not retried on the same runner
 - 📨 **Telegram notifications** — chunked per-account reports with privacy-safe account fingerprints
 - 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating final results
-- 📸 **Opt-in diagnostics** — optionally sends error/uncertain/CAPTCHA screenshots to a private Telegram chat
+- 📸 **CAPTCHA evidence** — always captures CAPTCHA pages for private Telegram; other error screenshots remain opt-in
 - 🚦 **Truthful CI status** — incomplete votes report to Telegram, then fail the workflow
 - 🧹 **Auto-cleanup** — keeps the latest 10 completed GitHub Actions runs repository-wide
 - 📌 **Reproducible builds** — Python packages and GitHub Actions are pinned to tested immutable versions
@@ -73,7 +73,7 @@ Go to your repo **Settings → Secrets and variables → Actions → New reposit
 | `BOT_IDS` | ❌ | Bot ID(s) to vote for — one per line. Default: `830530156048285716` |
 | `TG_BOT_TOKEN` | ❌ | Telegram bot token (from [@BotFather](https://t.me/BotFather)) |
 | `TG_CHAT_ID` | ❌ | Telegram chat/user ID for vote result notifications |
-| `SEND_ERROR_SCREENSHOTS` | ❌ | Set to `1` to send error/uncertain/CAPTCHA screenshots to Telegram; default is disabled |
+| `SEND_ERROR_SCREENSHOTS` | ❌ | Set to `1` for non-CAPTCHA error/uncertain screenshots; CAPTCHA screenshots are automatic |
 | `TOPGG_COOKIES_JSON` | ❌ | Full extension JSON export, one line per account matching `TOKENS` order |
 
 At runtime, workflow copies credential secrets into mode-`0600` temporary files, unsets raw values, and passes only file paths to Python. Python reads and unlinks those files before Chrome starts. `BOT_IDS` and `SEND_ERROR_SCREENSHOTS` are non-credential configuration values and remain ordinary environment variables.
@@ -162,9 +162,11 @@ set DEBUG=1 && python vote.py
 DEBUG=1 python vote.py
 ```
 
-Error screenshots remain disabled unless `SEND_ERROR_SCREENSHOTS=1` is set.
+Non-CAPTCHA error screenshots remain disabled unless `SEND_ERROR_SCREENSHOTS=1` is set.
 
-For GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error, uncertain, and CAPTCHA states send screenshots to configured Telegram chat. Keep chat private: screenshots may contain Discord username, avatar, or top.gg account details. Without this secret, workflow screenshots remain disabled.
+CAPTCHA outcomes always capture the current browser page when possible and send it to the configured Telegram chat immediately after the text report. This includes CAPTCHA during top.gg cookie authentication, Discord OAuth, vote submission, and vote verification. No `SEND_ERROR_SCREENSHOTS` secret is required for CAPTCHA evidence.
+
+For other GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error and uncertain states then send screenshots to configured Telegram chat. Keep chat private: screenshots may contain Discord username, avatar, or top.gg account details. Screenshots are never uploaded as GitHub artifacts and local files are deleted after each Telegram delivery attempt.
 
 > [!WARNING]
 > Use ephemeral, single-tenant GitHub-hosted runners only. Do not run this project on persistent/shared self-hosted runners: browser processes handle live account credentials and temporary profiles.
@@ -183,7 +185,7 @@ Transient authentication/browser failures retry up to 3 times. In multi-bot runs
 ```text
 auto-vote-topgg/
 ├── vote.py                          # Auth, vote, cooldown state, report, browser lifecycle
-├── test_vote.py                     # 51 unit/regression tests
+├── test_vote.py                     # 60 unit/regression tests
 ├── audit_dependencies.py            # Stdlib OSV dependency audit
 ├── requirements.txt                 # Direct Python dependencies
 ├── requirements.lock                # Linux/Python 3.11 hashes and transitive pins

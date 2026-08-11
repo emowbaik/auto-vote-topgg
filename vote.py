@@ -102,16 +102,22 @@ def scrub_browser_environment() -> None:
         os.environ.pop(f"{name}_FILE", None)
 
 
-async def error_screenshot(tab: Any, path: str) -> str | None:
-    if not SEND_ERROR_SCREENSHOTS:
+async def browser_screenshot(tab: Any, path: str, *, required: bool = False) -> str | None:
+    if not required and not SEND_ERROR_SCREENSHOTS:
         return None
     try:
-        os.makedirs("screenshots", exist_ok=True)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         await tab.save_screenshot(filename=path, format="png")
         return path
     except Exception as exc:
-        dbg(f"Error screenshot failed: {type(exc).__name__}")
+        dbg(f"Browser screenshot failed: {type(exc).__name__}")
+        if required:
+            print("  ⚠️  Could not capture CAPTCHA browser screenshot")
         return None
+
+
+async def error_screenshot(tab: Any, path: str) -> str | None:
+    return await browser_screenshot(tab, path)
 
 
 def send_telegram_photo(path: str, caption: str = "") -> bool:
@@ -121,11 +127,15 @@ def send_telegram_photo(path: str, caption: str = "") -> bool:
         with open(path, "rb") as file:
             response = requests.post(
                 f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
-                data={"chat_id": TG_CHAT_ID, "caption": caption},
+                data={"chat_id": TG_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
                 files={"photo": file},
                 timeout=30,
             )
-        return response.status_code == 200
+        try:
+            payload = response.json()
+        except ValueError:
+            return False
+        return response.status_code == 200 and payload.get("ok") is True
     except Exception as exc:
         dbg(f"Telegram photo failed: {type(exc).__name__}")
         return False
@@ -134,9 +144,46 @@ def send_telegram_photo(path: str, caption: str = "") -> bool:
 async def notify_error_screenshot(bot_id: str, path: str, detail: str) -> None:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
-    caption = f"❌ Vote failed for {bot_id}\n{detail}"
-    sent = await asyncio.to_thread(send_telegram_photo, path, caption)
-    print("  📸 Error screenshot sent to Telegram" if sent else "  ⚠️  Could not send error screenshot to Telegram")
+    caption = f"❌ Vote failed for {escape(str(bot_id))}\n{escape(str(detail))}"
+    try:
+        sent = await asyncio.to_thread(send_telegram_photo, path, caption)
+        print("  📸 Error screenshot sent to Telegram" if sent else "  ⚠️  Could not send error screenshot to Telegram")
+    finally:
+        with suppress(OSError):
+            Path(path).unlink()
+
+
+async def send_captcha_screenshots(all_results: list[list[dict]]) -> int:
+    """Send each CAPTCHA screenshot after the text report, then delete local evidence."""
+    sent_count = 0
+    handled_paths: set[str] = set()
+    for account_results in all_results:
+        for result in account_results:
+            if not is_captcha_related_result(result):
+                continue
+            path = result.get("screenshot_path")
+            if not isinstance(path, str) or not path or path in handled_paths:
+                continue
+            handled_paths.add(path)
+            account_id = escape(str(result.get("account_id", "?")))
+            bot_id = escape(str(result.get("bot_id", "?")))
+            detail = escape(str(result.get("detail", "CAPTCHA required")))
+            caption = (
+                "🔒 <b>CAPTCHA Browser Screenshot</b>\n"
+                f"👤 Account {account_id}\n"
+                f"🤖 {bot_id}: {detail}"
+            )
+            try:
+                sent = await asyncio.to_thread(send_telegram_photo, path, caption)
+                sent_count += int(sent)
+                print(
+                    "  📸 CAPTCHA screenshot sent to Telegram"
+                    if sent else "  ⚠️  Could not send CAPTCHA screenshot to Telegram"
+                )
+            finally:
+                with suppress(OSError):
+                    Path(path).unlink()
+    return sent_count
 
 
 def load_tokens(raw: str | None = None) -> list[str]:
@@ -157,6 +204,13 @@ def load_bot_ids() -> list[str]:
 
 def account_fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+def is_captcha_related_result(result: dict) -> bool:
+    return (
+        result.get("status") == "captcha_required"
+        or "captcha" in str(result.get("detail", "")).casefold()
+    )
 
 
 def is_retryable_result(result: dict) -> bool:
@@ -363,8 +417,13 @@ def send_notification(message: str) -> bool:
                 json={"chat_id": TG_CHAT_ID, "text": chunk, "parse_mode": "HTML"},
                 timeout=10,
             )
-            all_sent = all_sent and response.status_code == 200
-            if response.status_code != 200:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            delivered = response.status_code == 200 and payload.get("ok") is True
+            all_sent = all_sent and delivered
+            if not delivered:
                 print(f"⚠️  Notification chunk failed: {response.status_code}")
         except Exception as exc:
             all_sent = False
@@ -620,12 +679,22 @@ async def solve_turnstile(tab: Any) -> bool:
     return False
 
 
-async def captcha_result(tab: Any, bot_id: str, detail: str) -> dict:
+async def captcha_result(
+    tab: Any,
+    bot_id: str,
+    detail: str,
+    account_id: str = "unknown",
+) -> dict:
     print(f"  🔒 Interactive CAPTCHA required for {bot_id}")
-    path = await error_screenshot(tab, f"screenshots/vote_{bot_id}_captcha.png")
+    result = {"bot_id": bot_id, "status": "captcha_required", "detail": detail}
+    path = await browser_screenshot(
+        tab,
+        f"screenshots/vote_{account_id}_{bot_id}_captcha.png",
+        required=True,
+    )
     if path:
-        await notify_error_screenshot(bot_id, path, detail)
-    return {"bot_id": bot_id, "status": "captcha_required", "detail": detail}
+        result["screenshot_path"] = path
+    return result
 
 
 async def wait_for_ad(tab: Any, bot_id: str) -> dict | None:
@@ -656,7 +725,7 @@ async def mark_vote_button(tab: Any) -> dict:
     })()""") or {})
 
 
-async def vote_for_bot(tab: Any, bot_id: str) -> dict:
+async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> dict:
     print(f"  → Voting for bot {bot_id}...")
     await tab.get(f"https://top.gg/bot/{bot_id}/vote")
     await asyncio.sleep(3)
@@ -677,14 +746,18 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
         return cooldown_result(bot_id, text)
 
     if await is_turnstile_present(tab) and not await solve_turnstile(tab):
-        return await captcha_result(tab, bot_id, "Interactive CAPTCHA requires manual completion")
+        return await captcha_result(
+            tab, bot_id, "Interactive CAPTCHA requires manual completion", account_id
+        )
 
     ad_error = await wait_for_ad(tab, bot_id)
     if ad_error:
         return ad_error
 
     if await is_turnstile_present(tab) and not await solve_turnstile(tab):
-        return await captcha_result(tab, bot_id, "Interactive CAPTCHA requires manual completion")
+        return await captcha_result(
+            tab, bot_id, "Interactive CAPTCHA requires manual completion", account_id
+        )
 
     deadline = asyncio.get_running_loop().time() + TIMEOUT_VOTE_SEC
     state = {}
@@ -693,7 +766,9 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
         if state.get("found") and not state.get("disabled"):
             break
         if await is_turnstile_present(tab) and not await solve_turnstile(tab):
-            return await captcha_result(tab, bot_id, "Interactive CAPTCHA requires manual completion")
+            return await captcha_result(
+                tab, bot_id, "Interactive CAPTCHA requires manual completion", account_id
+            )
         await asyncio.sleep(2)
     else:
         path = await error_screenshot(tab, f"screenshots/vote_{bot_id}_no_btn.png")
@@ -712,7 +787,7 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
         print(f"  ✅ Successfully voted for {bot_id}")
         return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
     if await is_turnstile_present(tab) and not await is_turnstile_solved(tab):
-        return await captcha_result(tab, bot_id, "CAPTCHA appeared after clicking Vote")
+        return await captcha_result(tab, bot_id, "CAPTCHA appeared after clicking Vote", account_id)
 
     await tab.reload()
     await asyncio.sleep(3)
@@ -724,7 +799,7 @@ async def vote_for_bot(tab: Any, bot_id: str) -> dict:
         print(f"  ✅ Successfully voted for {bot_id}")
         return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
     if await is_turnstile_present(tab) and not await is_turnstile_solved(tab):
-        return await captcha_result(tab, bot_id, "CAPTCHA present after vote verification")
+        return await captcha_result(tab, bot_id, "CAPTCHA present after vote verification", account_id)
 
     path = await error_screenshot(tab, f"screenshots/vote_{bot_id}_uncertain.png")
     if path:
@@ -812,12 +887,20 @@ async def _run_account(
         if auth_state == AUTH_INVALID:
             auth_state = await discord_oauth_login(tab, token, bot_ids)
         if auth_state == AUTH_CAPTCHA_REQUIRED:
-            return [{
+            result = {
                 "bot_id": "all",
                 "status": "captcha_required",
                 "detail": "CAPTCHA blocked authentication",
                 "account_id": account_id,
-            }]
+            }
+            path = await browser_screenshot(
+                tab,
+                f"screenshots/auth_{account_id}_captcha.png",
+                required=True,
+            )
+            if path:
+                result["screenshot_path"] = path
+            return [result]
         if auth_state != AUTHENTICATED:
             return [{
                 "bot_id": "all",
@@ -827,8 +910,16 @@ async def _run_account(
             }]
 
         for position, bot_id in enumerate(bot_ids):
-            result = await vote_for_bot(tab, bot_id)
+            result = await vote_for_bot(tab, bot_id, account_id)
             result["account_id"] = account_id
+            if is_captcha_related_result(result) and not result.get("screenshot_path"):
+                path = await browser_screenshot(
+                    tab,
+                    f"screenshots/vote_{account_id}_{bot_id}_captcha.png",
+                    required=True,
+                )
+                if path:
+                    result["screenshot_path"] = path
             results.append(result)
             if position < len(bot_ids) - 1:
                 await asyncio.sleep(DELAY_BETWEEN_BOTS_SEC)
@@ -970,7 +1061,9 @@ async def main() -> int:
     retry_at = write_next_vote_state(all_results)
     if retry_at is not None:
         print(f"⏰ Next cooldown retry: {format_retry_at(retry_at)}")
-    send_notification(build_notification(all_results, now))
+    report = build_notification(all_results, now)
+    send_notification(report)
+    await send_captcha_screenshots(all_results)
     return 1 if has_business_failure(all_results) else 0
 
 
