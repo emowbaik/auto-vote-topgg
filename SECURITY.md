@@ -39,8 +39,13 @@ Workflow secrets are handed to Python through mode-`0600` temporary files. Pytho
 - CAPTCHA outcomes capture current browser view before profile cleanup and send it only to configured Telegram chat after the text report.
 - CAPTCHA captions contain account fingerprint, bot ID, and escaped result detail—not tokens or cookies.
 - Screenshot files are never GitHub artifacts and are deleted after every Telegram delivery attempt.
+- nodriver Turnstile checkbox matching uses hash-locked `opencv-python-headless`; response/page clearance is observed without token injection.
 
 ## Audit Log
+
+### 2026-08-12
+
+Added hash-locked OpenCV headless support for nodriver's native Turnstile checkbox template matching, explicit click/clearance diagnostics, and bounded terminal fallback without challenge-token injection.
 
 ### 2026-08-11
 

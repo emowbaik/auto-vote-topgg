@@ -654,10 +654,16 @@ async def is_turnstile_present(tab: Any) -> bool:
 
 async def is_turnstile_solved(tab: Any) -> bool:
     return bool(await evaluate(tab, """(() => {
-        const fields = document.querySelectorAll(
-            'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
-        );
-        return [...fields].some(field => field.value && field.value.length > 10);
+        const fields = document.querySelectorAll([
+            'input[name="cf-turnstile-response"]',
+            'textarea[name="cf-turnstile-response"]',
+            'input[name="cf_challenge_response"]',
+            'input[name="g-recaptcha-response"]',
+            'textarea[name="g-recaptcha-response"]'
+        ].join(','));
+        if ([...fields].some(field => field.value && field.value.length > 10)) return true;
+        const widget = document.querySelector('.cf-turnstile');
+        return Boolean(widget && widget.dataset.response && widget.dataset.response.length > 10);
     })()"""))
 
 
@@ -666,16 +672,24 @@ async def solve_turnstile(tab: Any) -> bool:
         return True
     if not await is_turnstile_present(tab):
         return True
-    print("  → Turnstile detected, attempting verification...")
+    print("  → Turnstile detected, clicking verification checkbox...")
     try:
         await tab.verify_cf()
+        print("  → Turnstile checkbox click dispatched")
     except Exception as exc:
         dbg(f"verify_cf failed: {type(exc).__name__}")
+        print(f"  ⚠️  Turnstile checkbox click failed ({type(exc).__name__})")
+        return False
     deadline = asyncio.get_running_loop().time() + TIMEOUT_VOTE_SEC
     while asyncio.get_running_loop().time() < deadline:
-        if await is_turnstile_solved(tab) or not await is_turnstile_present(tab):
+        if await is_turnstile_solved(tab):
+            print("  ✅ Turnstile response received")
+            return True
+        if not await is_turnstile_present(tab):
+            print("  ✅ Turnstile security page cleared")
             return True
         await asyncio.sleep(2)
+    print("  ⚠️  Turnstile remained active after checkbox click")
     return False
 
 
