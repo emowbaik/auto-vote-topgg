@@ -40,10 +40,15 @@ Workflow secrets are handed to Python through mode-`0600` temporary files. Pytho
 - CAPTCHA captions contain account fingerprint, bot ID, and escaped result detail—not tokens or cookies.
 - Screenshot files are never GitHub artifacts and are deleted after every Telegram delivery attempt.
 - nodriver Turnstile checkbox matching uses hash-locked `opencv-python-headless`; response/page clearance is observed without token injection.
+- Browser startup fresh-run retry artifact contains only `{"reason":"browser_startup_failed"}`; no credentials, account IDs, bot IDs, or screenshots.
+- Browser startup retry dispatch job holds `actions: write` only; no credential secrets.
+- Chrome process stderr/stdout diagnostics are bounded to 600 chars and redacted through the same credential-scrub path as exception details.
 
 ## Audit Log
 
 ### 2026-08-12
+
+Added automatic fresh-runner retry on browser startup failure: credential-free marker artifact, single-dispatch guard, loop prevention via source label and run_attempt, bounded/redacted Chrome process diagnostics, and 5 regression tests.
 
 Added hash-locked OpenCV headless support for nodriver's native Turnstile checkbox template matching, explicit click/clearance diagnostics, and bounded terminal fallback without challenge-token injection.
 

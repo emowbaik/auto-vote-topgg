@@ -13,6 +13,11 @@ on:
         required: false
         default: manual
         type: string
+      origin_run_id:
+        description: Original run id that requested an automatic browser-startup retry
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: topgg-vote-${{ github.ref }}
@@ -75,6 +80,7 @@ jobs:
           write_secret TG_CHAT_ID "$TG_CHAT_ID"
           unset TOKENS TOPGG_COOKIES_JSON TG_BOT_TOKEN TG_CHAT_ID
           export NEXT_VOTE_STATE_FILE="$RUNNER_TEMP/next-vote.json"
+          export BROWSER_RETRY_STATE_FILE="$RUNNER_TEMP/browser-startup-retry.json"
           set +e
           xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
           status=$?
@@ -103,6 +109,28 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Validate browser startup retry
+        id: browser-retry
+        if: always()
+        env:
+          STATE_FILE: ${{ runner.temp }}/browser-startup-retry.json
+        run: |
+          if [ ! -f "$STATE_FILE" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python -c 'import json, os; data=json.load(open(os.environ["STATE_FILE"], encoding="utf-8")); assert data == {"reason":"browser_startup_failed"}'
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload browser startup retry
+        if: steps.browser-retry.outputs.available == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-startup-retry
+          path: ${{ runner.temp }}/browser-startup-retry.json
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Apply vote result
         if: always()
         env:
@@ -121,6 +149,47 @@ jobs:
         env:
           VOTE_STATUS: ${{ needs.vote.outputs.vote_status }}
         run: test "$VOTE_STATUS" = "0"
+
+  browser-startup-retry:
+    needs: vote
+    if: always() && github.ref == 'refs/heads/master' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch one fresh-run retry when browser startup failed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SOURCE: ${{ github.event.inputs.source }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE" = "browser-startup-retry" ]; then
+            echo "Browser startup retry already consumed; no second dispatch."
+            exit 0
+          fi
+
+          artifact="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" --jq '[.artifacts[] | select(.name == "browser-startup-retry" and .expired == false)] | first // empty')"
+          artifact_id="$(jq -r '.id // empty' <<<"$artifact")"
+          if [ -z "$artifact_id" ]; then
+            echo "No browser startup retry marker; no dispatch."
+            exit 0
+          fi
+
+          state_dir="$(mktemp -d)"
+          trap 'rm -rf "$state_dir"' EXIT
+          gh api "repos/$REPOSITORY/actions/artifacts/$artifact_id/zip" > "$state_dir/state.zip"
+          unzip -qq "$state_dir/state.zip" -d "$state_dir/unpacked"
+          state_file="$state_dir/unpacked/browser-startup-retry.json"
+          STATE_FILE="$state_file" python -c 'import json, os; data=json.load(open(os.environ["STATE_FILE"], encoding="utf-8")); assert data == {"reason":"browser_startup_failed"}'
+
+          gh api --method POST "repos/$REPOSITORY/actions/workflows/vote.yml/dispatches" \
+            -f "ref=$GITHUB_REF_NAME" \
+            -f 'inputs[source]=browser-startup-retry' \
+            -f "inputs[origin_run_id]=$RUN_ID"
+          echo "Dispatched one fresh-run retry for browser startup failure from run $RUN_ID"
 
   cleanup:
     needs: vote
