@@ -18,6 +18,7 @@ Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible 
 - 🔐 **OAuth fallback** — uses Discord OAuth when cookies are missing or expired
 - ⚡ **Turnstile verification** — nodriver clicks Cloudflare checkbox using hash-locked OpenCV template matching
 - 🔒 **Explicit CAPTCHA fallback** — unresolved interactive CAPTCHA is reported and not retried on the same runner
+- 🔄 **Browser startup fresh-run retry** — runner-local Chrome startup failure automatically dispatches one fresh-runner retry
 - 📨 **Telegram notifications** — chunked per-account reports with privacy-safe account fingerprints
 - 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating final results
 - 📸 **CAPTCHA evidence** — always captures CAPTCHA pages for private Telegram; other error screenshots remain opt-in
@@ -140,6 +141,22 @@ You can vote again in about 1 hour.
 
 The artifact and dispatcher job contain no Discord token, top.gg cookie, Telegram token, account ID, or bot ID. Unparseable cooldown text creates no dynamic retry; 07:00/19:00 WIB remains the fallback. If a dynamic run is still early, the new cooldown is parsed and scheduled again.
 
+### Browser Startup Fresh-Run Retry
+
+Chrome startup may occasionally fail on a GitHub-hosted runner due to transient runner-level issues. When all accounts fail with a browser startup error (exit code/stderr included in report), `vote.py` writes a credential-free marker artifact:
+
+```json
+{"reason":"browser_startup_failed"}
+```
+
+The `browser-startup-retry` workflow job reads this artifact and dispatches **exactly one** fresh `vote.yml` run on a new runner. The retry run is identified in the Actions UI by `source=browser-startup-retry` and `origin_run_id=<original-run-id>`.
+
+Guards:
+- Retry run with `source=browser-startup-retry` never dispatches again.
+- Only first attempt (`run_attempt == 1`) may dispatch.
+- Marker artifact contains no tokens, cookies, account IDs, bot IDs, or screenshots.
+- Original failed run remains a truthful failure; Telegram error report is sent before retry starts.
+
 ### Fork & Scheduled Workflow Protection
 
 GitHub automatically disables scheduled (`cron`) workflows in public repositories after **60 days of inactivity**, including forks.
@@ -186,7 +203,7 @@ Transient authentication/browser failures retry up to 3 times. In multi-bot runs
 ```text
 auto-vote-topgg/
 ├── vote.py                          # Auth, vote, cooldown state, report, browser lifecycle
-├── test_vote.py                     # 65 unit/regression tests
+├── test_vote.py                     # 70 unit/regression tests
 ├── audit_dependencies.py            # Stdlib OSV dependency audit
 ├── requirements.txt                 # Direct Python dependencies
 ├── requirements.lock                # Linux/Python 3.11 hashes and transitive pins

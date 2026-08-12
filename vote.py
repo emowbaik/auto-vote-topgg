@@ -36,6 +36,9 @@ AUTHENTICATED = "authenticated"
 AUTH_INVALID = "invalid"
 AUTH_CAPTCHA_REQUIRED = "captcha_required"
 TELEGRAM_MESSAGE_LIMIT = 3500
+DIAGNOSTIC_DETAIL_LIMIT = 600
+BROWSER_RETRY_REASON = "browser_startup_failed"
+BROWSER_STARTUP_DETAIL_PREFIX = "Browser startup failed:"
 COOLDOWN_SAFETY_BUFFER_SEC = 5 * 60
 MIN_COOLDOWN_SEC = 60
 MAX_COOLDOWN_SEC = 24 * 60 * 60
@@ -76,11 +79,7 @@ def dbg(msg: str) -> None:
 
 def safe_exception_detail(exc: Exception) -> str:
     """Redact configured credentials before exposing a short diagnostic."""
-    detail = str(exc).replace("\n", " ").strip()
-    for secret in SENSITIVE_VALUES:
-        if secret:
-            detail = detail.replace(secret, "***")
-    return detail[:200] or "no detail"
+    return redact_diagnostic(str(exc), 200)
 
 
 def consume_secret(name: str) -> str:
@@ -285,6 +284,38 @@ def write_next_vote_state(all_results: list[list[dict]], path_value: str | None 
     )
     temporary.replace(path)
     return retry_at
+
+
+def is_browser_startup_result(result: dict) -> bool:
+    return (
+        result.get("bot_id") == "all"
+        and result.get("status") == "error"
+        and str(result.get("detail", "")).startswith(BROWSER_STARTUP_DETAIL_PREFIX)
+    )
+
+
+def should_request_browser_startup_retry(all_results: list[list[dict]]) -> bool:
+    return bool(all_results) and all(
+        len(account_results) == 1 and is_browser_startup_result(account_results[0])
+        for account_results in all_results
+    )
+
+
+def write_browser_startup_retry_state(
+    all_results: list[list[dict]], path_value: str | None = None
+) -> bool:
+    path_text = path_value if path_value is not None else os.environ.get("BROWSER_RETRY_STATE_FILE", "")
+    if not path_text.strip() or not should_request_browser_startup_retry(all_results):
+        return False
+    path = Path(path_text)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps({"reason": BROWSER_RETRY_REASON}, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return True
 
 
 def _normalize_cookie(cookie: dict, line_number: int = 0) -> dict:
@@ -821,6 +852,45 @@ async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> di
     return {"bot_id": bot_id, "status": "uncertain", "detail": "Clicked, result unclear"}
 
 
+def normalize_diagnostic(value: bytes | str) -> str:
+    text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+    return " ".join(text.split())
+
+
+def redact_diagnostic(value: str, limit: int = DIAGNOSTIC_DETAIL_LIMIT) -> str:
+    detail = normalize_diagnostic(value)
+    for secret in SENSITIVE_VALUES:
+        if secret:
+            detail = detail.replace(secret, "***")
+    return detail[:limit] or "no detail"
+
+
+async def read_process_stream_excerpt(stream: Any) -> str:
+    if stream is None:
+        return ""
+    try:
+        chunk = await asyncio.wait_for(stream.read(DIAGNOSTIC_DETAIL_LIMIT), timeout=0.5)
+    except (TimeoutError, asyncio.TimeoutError, OSError, ValueError):
+        return ""
+    return redact_diagnostic(chunk)
+
+
+async def chrome_process_diagnostics(process: Any) -> str:
+    if process is None:
+        return ""
+    parts = []
+    returncode = getattr(process, "returncode", None)
+    if returncode is not None:
+        parts.append(f"exit={returncode}")
+    stderr = await read_process_stream_excerpt(getattr(process, "stderr", None))
+    stdout = await read_process_stream_excerpt(getattr(process, "stdout", None))
+    if stderr and stderr != "no detail":
+        parts.append(f"stderr={stderr}")
+    if stdout and stdout != "no detail":
+        parts.append(f"stdout={stdout}")
+    return redact_diagnostic("; ".join(parts)) if parts else ""
+
+
 async def close_browser(browser: Any) -> None:
     if browser is None:
         return
@@ -848,8 +918,12 @@ async def close_browser(browser: Any) -> None:
             raise BrowserCleanupError("Sensitive browser profile could not be deleted") from exc
 
 
+
+
+
 async def start_browser() -> Any:
     last_error = None
+    last_error_detail = "no detail"
     scrub_browser_environment()
     for attempt in range(1, BROWSER_START_RETRIES + 1):
         profile_path = tempfile.mkdtemp(prefix="auto-vote-topgg-")
@@ -873,13 +947,16 @@ async def start_browser() -> Any:
             return browser
         except Exception as exc:
             last_error = exc
+            process = getattr(browser, "_process", None)
+            diagnostic = await chrome_process_diagnostics(process)
             await close_browser(browser)
+            last_error_detail = f"{type(exc).__name__}: {safe_exception_detail(exc)}"
+            if diagnostic:
+                last_error_detail = f"{last_error_detail}; chrome {diagnostic}"
             dbg(f"Browser startup {attempt}/{BROWSER_START_RETRIES} failed: {type(exc).__name__}")
             if attempt < BROWSER_START_RETRIES:
                 await asyncio.sleep(BROWSER_START_RETRY_SEC)
-    raise BrowserStartupError(
-        f"{type(last_error).__name__}: {safe_exception_detail(last_error)}"
-    ) from last_error
+    raise BrowserStartupError(last_error_detail) from last_error
 
 
 async def _run_account(
@@ -1075,6 +1152,8 @@ async def main() -> int:
     retry_at = write_next_vote_state(all_results)
     if retry_at is not None:
         print(f"⏰ Next cooldown retry: {format_retry_at(retry_at)}")
+    if write_browser_startup_retry_state(all_results):
+        print("↺ Browser startup fresh-run retry requested")
     report = build_notification(all_results, now)
     send_notification(report)
     await send_captcha_screenshots(all_results)

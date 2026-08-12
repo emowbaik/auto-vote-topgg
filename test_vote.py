@@ -198,6 +198,65 @@ class CooldownSchedulingTests(unittest.TestCase):
         self.assertIn("retry after 2026-08-10 10:05 WIB", message)
 
 
+class BrowserStartupRetryStateTests(unittest.TestCase):
+    def browser_error(self, account_id="id"):
+        return [{
+            "account_id": account_id,
+            "bot_id": "all",
+            "status": "error",
+            "detail": "Browser startup failed: Exception: Failed to connect to browser",
+        }]
+
+    def test_detects_account_level_browser_startup_failure_only(self):
+        self.assertTrue(vote.is_browser_startup_result(self.browser_error()[0]))
+        self.assertFalse(vote.is_browser_startup_result({
+            "bot_id": "111",
+            "status": "error",
+            "detail": "Browser startup failed: Exception",
+        }))
+        self.assertFalse(vote.is_browser_startup_result({
+            "bot_id": "all",
+            "status": "error",
+            "detail": "TypeError: broken",
+        }))
+
+    def test_requests_retry_only_when_all_accounts_failed_browser_startup(self):
+        self.assertTrue(vote.should_request_browser_startup_retry([
+            self.browser_error("a"),
+            self.browser_error("b"),
+        ]))
+        self.assertFalse(vote.should_request_browser_startup_retry([]))
+        self.assertFalse(vote.should_request_browser_startup_retry([
+            self.browser_error("a"),
+            [{"bot_id": "111", "status": "success"}],
+        ]))
+        self.assertFalse(vote.should_request_browser_startup_retry([
+            [{"bot_id": "all", "status": "captcha_required", "detail": "captcha"}],
+        ]))
+        self.assertFalse(vote.should_request_browser_startup_retry([
+            [{"bot_id": "111", "status": "cooldown"}],
+        ]))
+        self.assertFalse(vote.should_request_browser_startup_retry([
+            [{"bot_id": "all", "status": "error", "detail": "RuntimeError: generic"}],
+        ]))
+
+    def test_retry_marker_contains_only_reason_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "browser-startup-retry.json")
+            self.assertTrue(vote.write_browser_startup_retry_state([self.browser_error()], path))
+            with open(path, encoding="utf-8") as file:
+                self.assertEqual(json.load(file), {"reason": "browser_startup_failed"})
+
+    def test_no_retry_marker_for_mixed_or_non_browser_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "browser-startup-retry.json")
+            self.assertFalse(vote.write_browser_startup_retry_state([
+                self.browser_error("a"),
+                [{"bot_id": "111", "status": "success"}],
+            ], path))
+            self.assertFalse(os.path.exists(path))
+
+
 class CooldownVotePageTests(unittest.IsolatedAsyncioTestCase):
     @patch("builtins.print")
     @patch("vote.asyncio.sleep", new_callable=AsyncMock)
@@ -582,6 +641,7 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
         browser = browser_class.return_value
         browser.start = AsyncMock(side_effect=RuntimeError("connect failed"))
         browser.aclose = AsyncMock()
+        browser._process = None
         with patch.dict(
             os.environ,
             {
@@ -601,6 +661,20 @@ class BrowserLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(os.path.exists(profile_path))
         browser.aclose.assert_awaited_once()
         browser.stop.assert_called_once()
+
+    async def test_chrome_process_diagnostics_redacts_and_truncates(self):
+        class Stream:
+            async def read(self, _limit):
+                return ("secret " + "x" * vote.DIAGNOSTIC_DETAIL_LIMIT).encode()
+
+        process = MagicMock(returncode=9, stderr=Stream(), stdout=None)
+        with patch.object(vote, "SENSITIVE_VALUES", ["secret"]):
+            detail = await vote.chrome_process_diagnostics(process)
+
+        self.assertIn("exit=9", detail)
+        self.assertIn("***", detail)
+        self.assertNotIn("secret", detail)
+        self.assertLessEqual(len(detail), vote.DIAGNOSTIC_DETAIL_LIMIT)
 
     async def test_close_browser_deletes_explicit_profile(self):
         browser = MagicMock()
