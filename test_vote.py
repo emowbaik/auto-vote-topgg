@@ -277,6 +277,91 @@ class CooldownVotePageTests(unittest.IsolatedAsyncioTestCase):
         tab.get.assert_awaited_once_with("https://top.gg/bot/111/vote")
 
 
+class PostVoteTurnstileTests(unittest.IsolatedAsyncioTestCase):
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.solve_turnstile", new_callable=AsyncMock, return_value=True)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock)
+    @patch("vote._click_marked", new_callable=AsyncMock, return_value=True)
+    @patch("vote.mark_vote_button", new_callable=AsyncMock, return_value={"found": True, "disabled": False})
+    @patch("vote.wait_for_ad", new_callable=AsyncMock, return_value=None)
+    @patch("vote.evaluate", new_callable=AsyncMock, return_value="Voting for bot")
+    @patch("vote.body_text", new_callable=AsyncMock)
+    async def test_solves_turnstile_after_clicking_vote(
+        self, body_text, _evaluate, _ad, _mark, _click, present, solver, _sleep, _print
+    ):
+        body_text.side_effect = [
+            "ready to vote",
+            "Please solve the captcha to continue",
+            "Thanks for voting",
+        ]
+        present.side_effect = [False, False, True]
+        tab = AsyncMock()
+
+        result = await vote.vote_for_bot(tab, "111", "account")
+
+        self.assertEqual(result["status"], "success")
+        solver.assert_awaited_once_with(tab)
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.browser_screenshot", new_callable=AsyncMock, return_value="screenshots/vote_account_111_captcha.png")
+    @patch("vote.solve_turnstile", new_callable=AsyncMock, return_value=False)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock)
+    @patch("vote._click_marked", new_callable=AsyncMock, return_value=True)
+    @patch("vote.mark_vote_button", new_callable=AsyncMock, return_value={"found": True, "disabled": False})
+    @patch("vote.wait_for_ad", new_callable=AsyncMock, return_value=None)
+    @patch("vote.evaluate", new_callable=AsyncMock, return_value="Voting for bot")
+    @patch("vote.body_text", new_callable=AsyncMock)
+    async def test_reports_captcha_only_after_post_vote_solver_fails(
+        self, body_text, _evaluate, _ad, _mark, _click, present, solver, screenshot, _sleep, _print
+    ):
+        body_text.side_effect = [
+            "ready to vote",
+            "Please solve the captcha to continue",
+        ]
+        present.side_effect = [False, False, True]
+        tab = AsyncMock()
+
+        result = await vote.vote_for_bot(tab, "111", "account")
+
+        self.assertEqual(result["status"], "captcha_required")
+        self.assertIn("after solver attempt", result["detail"])
+        solver.assert_awaited_once_with(tab)
+        screenshot.assert_awaited_once_with(
+            tab,
+            "screenshots/vote_account_111_captcha.png",
+            required=True,
+        )
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.solve_turnstile", new_callable=AsyncMock, return_value=True)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock)
+    @patch("vote._click_marked", new_callable=AsyncMock, return_value=True)
+    @patch("vote.mark_vote_button", new_callable=AsyncMock, return_value={"found": True, "disabled": False})
+    @patch("vote.wait_for_ad", new_callable=AsyncMock, return_value=None)
+    @patch("vote.evaluate", new_callable=AsyncMock, return_value="Voting for bot")
+    @patch("vote.body_text", new_callable=AsyncMock)
+    async def test_solves_turnstile_after_vote_verification_reload(
+        self, body_text, _evaluate, _ad, _mark, _click, present, solver, _sleep, _print
+    ):
+        body_text.side_effect = [
+            "ready to vote",
+            "vote result unclear",
+            "Please solve the captcha to continue",
+            "You have already voted",
+        ]
+        present.side_effect = [False, False, False, True]
+        tab = AsyncMock()
+
+        result = await vote.vote_for_bot(tab, "111", "account")
+
+        self.assertEqual(result["status"], "success")
+        solver.assert_awaited_once_with(tab)
+        tab.reload.assert_awaited_once()
+
+
 class MainExitTests(unittest.IsolatedAsyncioTestCase):
     @patch("vote.consume_secret")
     @patch("builtins.print")
