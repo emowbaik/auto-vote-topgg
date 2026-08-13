@@ -831,8 +831,19 @@ async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> di
     if "thanks for voting" in text:
         print(f"  ✅ Successfully voted for {bot_id}")
         return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
-    if await is_turnstile_present(tab) and not await is_turnstile_solved(tab):
-        return await captcha_result(tab, bot_id, "CAPTCHA appeared after clicking Vote", account_id)
+    if await is_turnstile_present(tab):
+        if not await solve_turnstile(tab):
+            return await captcha_result(
+                tab,
+                bot_id,
+                "CAPTCHA still required after solver attempt following Vote click",
+                account_id,
+            )
+        await asyncio.sleep(3)
+        text = (await body_text(tab)).lower()
+        if "thanks for voting" in text:
+            print(f"  ✅ Successfully voted for {bot_id}")
+            return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
 
     await tab.reload()
     await asyncio.sleep(3)
@@ -843,8 +854,22 @@ async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> di
     )):
         print(f"  ✅ Successfully voted for {bot_id}")
         return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
-    if await is_turnstile_present(tab) and not await is_turnstile_solved(tab):
-        return await captcha_result(tab, bot_id, "CAPTCHA present after vote verification", account_id)
+    if await is_turnstile_present(tab):
+        if not await solve_turnstile(tab):
+            return await captcha_result(
+                tab,
+                bot_id,
+                "CAPTCHA still required after solver attempt during vote verification",
+                account_id,
+            )
+        await asyncio.sleep(3)
+        text = (await body_text(tab)).lower()
+        if any(marker in text for marker in (
+            "you have already voted", "already voted", "vote again in",
+            "can vote again", "thanks for voting", "thank you",
+        )):
+            print(f"  ✅ Successfully voted for {bot_id}")
+            return {"bot_id": bot_id, "status": "success", "detail": "Vote successful"}
 
     path = await error_screenshot(tab, f"screenshots/vote_{bot_id}_uncertain.png")
     if path:
