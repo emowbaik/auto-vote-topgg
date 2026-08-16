@@ -590,10 +590,17 @@ async def dismiss_privacy_overlay(tab: Any) -> bool:
                 body.includes('personalised ads and content');
             if (!looksLikeConsent) return {present: false, dismissed: false, reason: 'not_present'};
             const labels = new Set(['agree', 'accept', 'accept all', 'allow all', 'i agree']);
+            const direct = document.querySelector('#accept-btn');
             const controls = [...document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')];
-            const target = controls.find(el => {
-                const text = ((el.innerText || el.value || el.getAttribute('aria-label') || '')).trim().toLowerCase();
-                return labels.has(text);
+            const target = direct || controls.find(el => {
+                const text = [
+                    el.innerText,
+                    el.textContent,
+                    el.value,
+                    el.getAttribute('aria-label'),
+                    el.id,
+                ].filter(Boolean).join(' ').trim().toLowerCase();
+                return labels.has(text) || text.includes('agree') || text.includes('accept');
             });
             if (!target) return {present: true, dismissed: false, reason: 'consent_button_not_found'};
             try {

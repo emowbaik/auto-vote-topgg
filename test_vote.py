@@ -668,6 +668,8 @@ class PrivacyOverlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await vote.dismiss_privacy_overlay(tab))
         expression = evaluate_mock.call_args.args[1]
         self.assertIn("we value your privacy", expression)
+        self.assertIn("#accept-btn", expression)
+        self.assertIn("textContent", expression)
         self.assertIn("agree", expression)
 
     @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)
