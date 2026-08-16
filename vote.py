@@ -550,6 +550,29 @@ async def _click_marked(tab: Any, marker: str) -> bool:
         return False
 
 
+async def dismiss_privacy_overlay(tab: Any) -> bool:
+    try:
+        return bool(await evaluate(tab, """(() => {
+            const body = document.body ? document.body.innerText.toLowerCase() : '';
+            const looksLikeConsent = body.includes('we value your privacy') ||
+                body.includes('partners store and/or access information') ||
+                body.includes('personalised ads and content');
+            if (!looksLikeConsent) return false;
+            const labels = new Set(['agree', 'accept', 'accept all', 'allow all', 'i agree']);
+            const controls = [...document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')];
+            const target = controls.find(el => {
+                const text = ((el.innerText || el.value || el.getAttribute('aria-label') || '')).trim().toLowerCase();
+                return labels.has(text);
+            });
+            if (!target) return false;
+            target.click();
+            return true;
+        })()"""))
+    except Exception as exc:
+        dbg(f"Privacy overlay dismiss skipped: {type(exc).__name__}")
+        return False
+
+
 async def inject_topgg_cookies(browser: Any, cookies: list[dict]) -> None:
     params = []
     for cookie in cookies:
@@ -584,6 +607,7 @@ async def is_topgg_authenticated(tab: Any) -> bool:
 
 
 async def topgg_auth_state(tab: Any) -> str:
+    await dismiss_privacy_overlay(tab)
     if await is_topgg_authenticated(tab):
         return AUTHENTICATED
     if await is_turnstile_present(tab):
@@ -602,6 +626,7 @@ async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) 
     await inject_topgg_cookies(tab.browser, cookies)
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(3)
+    await dismiss_privacy_overlay(tab)
     state = await topgg_auth_state(tab)
     if state == AUTHENTICATED:
         print("  ✅ Authenticated via top.gg cookies")
@@ -639,6 +664,7 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
     print("  → Setting Discord session for top.gg login...")
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(2)
+    await dismiss_privacy_overlay(tab)
     state = await topgg_auth_state(tab)
     if state != AUTH_INVALID:
         print("  ✅ Already logged into top.gg" if state == AUTHENTICATED else "  🔒 CAPTCHA blocked top.gg session probe")
@@ -666,6 +692,7 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
     }})()""")
     await tab.reload()
     await asyncio.sleep(2)
+    await dismiss_privacy_overlay(tab)
     state = await topgg_auth_state(tab)
     if state == AUTHENTICATED:
         print("  ✅ Session established without OAuth redirect")
@@ -736,6 +763,7 @@ async def is_turnstile_solved(tab: Any) -> bool:
 
 
 async def solve_turnstile(tab: Any) -> bool:
+    await dismiss_privacy_overlay(tab)
     if await is_turnstile_solved(tab):
         return True
     if not await is_turnstile_present(tab):
@@ -811,12 +839,14 @@ async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> di
     print(f"  → Voting for bot {bot_id}...")
     await tab.get(f"https://top.gg/bot/{bot_id}/vote")
     await asyncio.sleep(3)
+    await dismiss_privacy_overlay(tab)
     text = (await body_text(tab)).lower()
 
     if "must be logged in" in text or "login to vote" in text:
         dbg("top.gg session not applied yet; reloading once")
         await tab.reload()
         await asyncio.sleep(3)
+        await dismiss_privacy_overlay(tab)
         text = (await body_text(tab)).lower()
 
     if "could not be found" in text or "404" in str(await evaluate(tab, "document.title")):
@@ -884,6 +914,7 @@ async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> di
 
     await tab.reload()
     await asyncio.sleep(3)
+    await dismiss_privacy_overlay(tab)
     text = (await body_text(tab)).lower()
     if any(marker in text for marker in (
         "you have already voted", "already voted", "vote again in",
