@@ -672,6 +672,16 @@ class PrivacyOverlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("textContent", expression)
         self.assertIn("agree", expression)
 
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock, side_effect=[False, True, False])
+    async def test_settle_privacy_overlay_retries_after_page_open(self, dismiss, sleep):
+        tab = AsyncMock()
+
+        self.assertTrue(await vote.settle_privacy_overlay(tab, attempts=3, delay=0.25))
+        self.assertEqual(dismiss.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+        sleep.assert_awaited_with(0.25)
+
     @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)
     async def test_marked_click_dismisses_privacy_overlay_first(self, dismiss):
         element = AsyncMock()
