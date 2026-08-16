@@ -623,6 +623,15 @@ async def dismiss_privacy_overlay(tab: Any) -> bool:
     return False
 
 
+async def settle_privacy_overlay(tab: Any, attempts: int = 4, delay: float = 0.75) -> bool:
+    dismissed = False
+    for attempt in range(attempts):
+        dismissed = await dismiss_privacy_overlay(tab) or dismissed
+        if attempt < attempts - 1:
+            await asyncio.sleep(delay)
+    return dismissed
+
+
 async def inject_topgg_cookies(browser: Any, cookies: list[dict]) -> None:
     params = []
     for cookie in cookies:
@@ -676,7 +685,7 @@ async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) 
     await inject_topgg_cookies(tab.browser, cookies)
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(3)
-    await dismiss_privacy_overlay(tab)
+    await settle_privacy_overlay(tab)
     state = await topgg_auth_state(tab)
     if state == AUTHENTICATED:
         print("  ✅ Authenticated via top.gg cookies")
@@ -714,7 +723,7 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
     print("  → Setting Discord session for top.gg login...")
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(2)
-    await dismiss_privacy_overlay(tab)
+    await settle_privacy_overlay(tab)
     state = await topgg_auth_state(tab)
     if state != AUTH_INVALID:
         print("  ✅ Already logged into top.gg" if state == AUTHENTICATED else "  🔒 CAPTCHA blocked top.gg session probe")
@@ -742,7 +751,7 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
     }})()""")
     await tab.reload()
     await asyncio.sleep(2)
-    await dismiss_privacy_overlay(tab)
+    await settle_privacy_overlay(tab)
     state = await topgg_auth_state(tab)
     if state == AUTHENTICATED:
         print("  ✅ Session established without OAuth redirect")
@@ -889,14 +898,14 @@ async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> di
     print(f"  → Voting for bot {bot_id}...")
     await tab.get(f"https://top.gg/bot/{bot_id}/vote")
     await asyncio.sleep(3)
-    await dismiss_privacy_overlay(tab)
+    await settle_privacy_overlay(tab)
     text = (await body_text(tab)).lower()
 
     if "must be logged in" in text or "login to vote" in text:
         dbg("top.gg session not applied yet; reloading once")
         await tab.reload()
         await asyncio.sleep(3)
-        await dismiss_privacy_overlay(tab)
+        await settle_privacy_overlay(tab)
         text = (await body_text(tab)).lower()
 
     if "could not be found" in text or "404" in str(await evaluate(tab, "document.title")):
@@ -964,7 +973,7 @@ async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> di
 
     await tab.reload()
     await asyncio.sleep(3)
-    await dismiss_privacy_overlay(tab)
+    await settle_privacy_overlay(tab)
     text = (await body_text(tab)).lower()
     if any(marker in text for marker in (
         "you have already voted", "already voted", "vote again in",

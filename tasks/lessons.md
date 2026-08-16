@@ -11,3 +11,4 @@
 - For random modal blockers, guard the lowest click primitive as well as page-level flow. Call overlay dismissal immediately before the actual click, because a modal can appear between earlier checks and the click.
 - When an automatic blocker-dismiss step fails while a blocker is present, report the failure at the user boundary with a screenshot and redacted reason, then dedupe to avoid Telegram spam.
 - Quantcast consent modals can place visible text inside child spans, so privacy-dismiss detection must prefer stable selectors like #accept-btn and include textContent/id fallback, not only innerText.
+- Privacy/consent modals may appear after navigation completes and after an initial sleep; use a short settle loop after page open/reload before checking auth or clicking Login.
