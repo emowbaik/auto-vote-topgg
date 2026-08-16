@@ -540,6 +540,7 @@ async def _mark_exact_element(tab: Any, selector: str, texts: list[str], marker:
 
 
 async def _click_marked(tab: Any, marker: str) -> bool:
+    await dismiss_privacy_overlay(tab)
     try:
         element = await tab.select(f'[{marker}="1"]', timeout=2)
         await element.scroll_into_view()

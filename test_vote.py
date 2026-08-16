@@ -670,6 +670,18 @@ class PrivacyOverlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("we value your privacy", expression)
         self.assertIn("agree", expression)
 
+    @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)
+    async def test_marked_click_dismisses_privacy_overlay_first(self, dismiss):
+        element = AsyncMock()
+        tab = AsyncMock()
+        tab.select.return_value = element
+
+        self.assertTrue(await vote._click_marked(tab, "data-auto-vote"))
+        dismiss.assert_awaited_once_with(tab)
+        tab.select.assert_awaited_once_with('[data-auto-vote="1"]', timeout=2)
+        element.scroll_into_view.assert_awaited_once()
+        element.click.assert_awaited_once()
+
     @patch("builtins.print")
     @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)
     @patch("vote.is_turnstile_present", new_callable=AsyncMock, return_value=True)
