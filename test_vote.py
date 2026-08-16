@@ -660,6 +660,30 @@ class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
         browser.aclose.assert_awaited_once()
 
 
+class PrivacyOverlayTests(unittest.IsolatedAsyncioTestCase):
+    @patch("vote.evaluate", new_callable=AsyncMock, return_value=True)
+    async def test_privacy_overlay_dismiss_clicks_detected_consent(self, evaluate_mock):
+        tab = AsyncMock()
+
+        self.assertTrue(await vote.dismiss_privacy_overlay(tab))
+        expression = evaluate_mock.call_args.args[1]
+        self.assertIn("we value your privacy", expression)
+        self.assertIn("agree", expression)
+
+    @patch("builtins.print")
+    @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock, return_value=True)
+    @patch("vote.is_turnstile_solved", new_callable=AsyncMock, side_effect=[False, True])
+    async def test_solver_dismisses_privacy_overlay_before_click(
+        self, _solved, _present, dismiss, _print
+    ):
+        tab = AsyncMock()
+
+        self.assertTrue(await vote.solve_turnstile(tab))
+        dismiss.assert_awaited_once_with(tab)
+        tab.verify_cf.assert_awaited_once_with()
+
+
 class TurnstileSolverTests(unittest.IsolatedAsyncioTestCase):
     @patch("builtins.print")
     @patch("vote.is_turnstile_present", new_callable=AsyncMock, return_value=False)
