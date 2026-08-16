@@ -9,3 +9,4 @@
 - CAPTCHA/Turnstile policy must be phase-independent: if a challenge appears after clicking Vote or after verification reload, call nodriver `verify_cf()` via the shared solver before reporting captcha_required. Terminal CAPTCHA reporting is only after solver failure, not on first detection.
 - Before clicking Turnstile or vote controls, clear site-level consent/privacy overlays. Visual blockers can cover the target while DOM detection still says the target exists, causing verify/click flakiness.
 - For random modal blockers, guard the lowest click primitive as well as page-level flow. Call overlay dismissal immediately before the actual click, because a modal can appear between earlier checks and the click.
+- When an automatic blocker-dismiss step fails while a blocker is present, report the failure at the user boundary with a screenshot and redacted reason, then dedupe to avoid Telegram spam.

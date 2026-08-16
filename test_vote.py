@@ -661,7 +661,7 @@ class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PrivacyOverlayTests(unittest.IsolatedAsyncioTestCase):
-    @patch("vote.evaluate", new_callable=AsyncMock, return_value=True)
+    @patch("vote.evaluate", new_callable=AsyncMock, return_value={"present": True, "dismissed": True})
     async def test_privacy_overlay_dismiss_clicks_detected_consent(self, evaluate_mock):
         tab = AsyncMock()
 
@@ -681,6 +681,33 @@ class PrivacyOverlayTests(unittest.IsolatedAsyncioTestCase):
         tab.select.assert_awaited_once_with('[data-auto-vote="1"]', timeout=2)
         element.scroll_into_view.assert_awaited_once()
         element.click.assert_awaited_once()
+
+    @patch("builtins.print")
+    @patch("vote.send_telegram_photo", return_value=True)
+    @patch("vote.browser_screenshot", new_callable=AsyncMock, return_value="screenshots/privacy_overlay_dismiss_failed.png")
+    @patch("vote.evaluate", new_callable=AsyncMock, return_value={
+        "present": True,
+        "dismissed": False,
+        "reason": "consent_button_not_found",
+    })
+    async def test_privacy_overlay_dismiss_failure_sends_screenshot(
+        self, _evaluate, screenshot, send_photo, _print
+    ):
+        tab = AsyncMock()
+        with (
+            patch.object(vote, "TG_BOT_TOKEN", "token"),
+            patch.object(vote, "TG_CHAT_ID", "chat"),
+            patch.object(vote, "PRIVACY_DISMISS_REPORTED", False),
+        ):
+            self.assertFalse(await vote.dismiss_privacy_overlay(tab))
+
+        screenshot.assert_awaited_once_with(
+            tab,
+            "screenshots/privacy_overlay_dismiss_failed.png",
+            required=True,
+        )
+        send_photo.assert_called_once()
+        self.assertIn("consent_button_not_found", send_photo.call_args.args[1])
 
     @patch("builtins.print")
     @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)

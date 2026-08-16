@@ -67,6 +67,7 @@ class BrowserCleanupError(RuntimeError):
 TG_BOT_TOKEN = ""
 TG_CHAT_ID = ""
 SENSITIVE_VALUES: list[str] = []
+PRIVACY_DISMISS_REPORTED = False
 
 
 def _load_dotenv(path: str | Path = ".env") -> None:
@@ -172,6 +173,35 @@ async def notify_error_screenshot(bot_id: str, path: str, detail: str) -> None:
     try:
         sent = await asyncio.to_thread(send_telegram_photo, path, caption)
         print("  📸 Error screenshot sent to Telegram" if sent else "  ⚠️  Could not send error screenshot to Telegram")
+    finally:
+        with suppress(OSError):
+            Path(path).unlink()
+
+
+async def report_privacy_dismiss_failure(tab: Any, detail: str) -> None:
+    global PRIVACY_DISMISS_REPORTED
+    if PRIVACY_DISMISS_REPORTED:
+        return
+    PRIVACY_DISMISS_REPORTED = True
+    safe_detail = redact_diagnostic(detail, 300)
+    print(f"  ⚠️  Privacy modal dismiss failed: {safe_detail}")
+    path = await browser_screenshot(
+        tab,
+        "screenshots/privacy_overlay_dismiss_failed.png",
+        required=True,
+    )
+    if not path:
+        if TG_BOT_TOKEN and TG_CHAT_ID:
+            send_notification(f"⚠️ Privacy modal dismiss failed\n{escape(safe_detail)}")
+        return
+    caption = f"⚠️ <b>Privacy modal dismiss failed</b>\n{escape(safe_detail)}"
+    try:
+        if TG_BOT_TOKEN and TG_CHAT_ID:
+            sent = await asyncio.to_thread(send_telegram_photo, path, caption)
+            print(
+                "  📸 Privacy modal failure screenshot sent to Telegram"
+                if sent else "  ⚠️  Could not send privacy modal screenshot to Telegram"
+            )
     finally:
         with suppress(OSError):
             Path(path).unlink()
@@ -553,25 +583,37 @@ async def _click_marked(tab: Any, marker: str) -> bool:
 
 async def dismiss_privacy_overlay(tab: Any) -> bool:
     try:
-        return bool(await evaluate(tab, """(() => {
+        result = await evaluate(tab, """(() => {
             const body = document.body ? document.body.innerText.toLowerCase() : '';
             const looksLikeConsent = body.includes('we value your privacy') ||
                 body.includes('partners store and/or access information') ||
                 body.includes('personalised ads and content');
-            if (!looksLikeConsent) return false;
+            if (!looksLikeConsent) return {present: false, dismissed: false, reason: 'not_present'};
             const labels = new Set(['agree', 'accept', 'accept all', 'allow all', 'i agree']);
             const controls = [...document.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]')];
             const target = controls.find(el => {
                 const text = ((el.innerText || el.value || el.getAttribute('aria-label') || '')).trim().toLowerCase();
                 return labels.has(text);
             });
-            if (!target) return false;
-            target.click();
-            return true;
-        })()"""))
+            if (!target) return {present: true, dismissed: false, reason: 'consent_button_not_found'};
+            try {
+                target.click();
+                return {present: true, dismissed: true, reason: 'clicked'};
+            } catch (error) {
+                return {present: true, dismissed: false, reason: `click_failed:${error && error.name ? error.name : 'Error'}`};
+            }
+        })()""")
     except Exception as exc:
+        detail = f"JavaScript check failed: {type(exc).__name__}: {safe_exception_detail(exc)}"
         dbg(f"Privacy overlay dismiss skipped: {type(exc).__name__}")
+        await report_privacy_dismiss_failure(tab, detail)
         return False
+    if not isinstance(result, dict) or not result.get("present"):
+        return False
+    if result.get("dismissed"):
+        return True
+    await report_privacy_dismiss_failure(tab, str(result.get("reason", "unknown dismiss failure")))
+    return False
 
 
 async def inject_topgg_cookies(browser: Any, cookies: list[dict]) -> None:
