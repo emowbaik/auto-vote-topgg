@@ -19,7 +19,6 @@ import nodriver as uc
 import requests
 
 WIB = timezone(timedelta(hours=7))
-DISCORD_LOGIN_URL = "https://discord.com/login"
 DEFAULT_BOT_IDS = ["830530156048285716"]
 TIMEOUT_OAUTH_SEC = 25
 TIMEOUT_VOTE_SEC = 30
@@ -637,27 +636,39 @@ async def _handle_discord_oauth(tab: Any) -> str:
 
 
 async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
-    print("  → Injecting Discord token...")
-    await tab.get(DISCORD_LOGIN_URL)
+    print("  → Setting Discord session for top.gg login...")
+    await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(2)
+    state = await topgg_auth_state(tab)
+    if state != AUTH_INVALID:
+        print("  ✅ Already logged into top.gg" if state == AUTHENTICATED else "  🔒 CAPTCHA blocked top.gg session probe")
+        return state
+
+    # ponytail: avoid discord.com/login navigation; token goes into discord.com
+    # localStorage via an iframe so top.gg can pick up the Discord session on Login.
     await evaluate(tab, f"""(() => {{
         const token = {json.dumps(token)};
         const frame = document.body.appendChild(document.createElement('iframe'));
-        if (frame.contentWindow) {{
-            frame.contentWindow.localStorage.setItem('token', JSON.stringify(token));
-            frame.contentWindow.localStorage.setItem('tokens', JSON.stringify({{"default": token}}));
-        }}
-        frame.remove();
+        frame.style.display = 'none';
+        frame.src = 'https://discord.com';
+    }})()""")
+    await asyncio.sleep(1.5)
+    await evaluate(tab, f"""(() => {{
+        const token = {json.dumps(token)};
+        const frame = document.querySelector('iframe[src=\"https://discord.com\"]');
+        try {{
+            if (frame && frame.contentWindow) {{
+                frame.contentWindow.localStorage.setItem('token', JSON.stringify(token));
+                frame.contentWindow.localStorage.setItem('tokens', JSON.stringify({{"default": token}}));
+            }}
+        }} catch (_) {{}}
+        if (frame) frame.remove();
     }})()""")
     await tab.reload()
-    await asyncio.sleep(3)
-
-    print("  → Navigating to top.gg to initiate login...")
-    await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
-    await asyncio.sleep(3)
+    await asyncio.sleep(2)
     state = await topgg_auth_state(tab)
     if state == AUTHENTICATED:
-        print("  ✅ Already logged into top.gg")
+        print("  ✅ Session established without OAuth redirect")
         return state
     if state == AUTH_CAPTCHA_REQUIRED:
         return state
