@@ -68,6 +68,32 @@ class BrowserCleanupError(RuntimeError):
 TG_BOT_TOKEN = ""
 TG_CHAT_ID = ""
 SENSITIVE_VALUES: list[str] = []
+
+
+def _load_dotenv(path: str | Path = ".env") -> None:
+    # ponytail: minimal stdlib parser. secrets stay local (.gitignore).
+    # Supports KEY=VALUE, optional quotes, avoids overwriting existing env.
+    # Upgrade to python-dotenv only if comment values / variable expansion needed.
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or not key.replace("_", "").isalnum() or key in os.environ:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+_load_dotenv()
+
 DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 SEND_ERROR_SCREENSHOTS = os.environ.get("SEND_ERROR_SCREENSHOTS", "").strip() == "1"
 
