@@ -572,6 +572,25 @@ class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     @patch("builtins.print")
     @patch("vote.asyncio.sleep", new_callable=AsyncMock)
     @patch("vote._run_account", new_callable=AsyncMock)
+    async def test_auth_failure_screenshot_capture_only_on_final_attempt(
+        self, run_account, _sleep, _print
+    ):
+        run_account.return_value = [
+            {"bot_id": "all", "status": "auth_failed", "detail": "auth", "account_id": "id"}
+        ]
+
+        results = await vote.process_account("token", ["111"], 1, 1)
+
+        self.assertEqual(results[0]["status"], "auth_failed")
+        self.assertEqual(run_account.await_count, vote.MAX_RETRIES)
+        self.assertEqual(
+            [call.kwargs["capture_auth_failure"] for call in run_account.await_args_list],
+            [False, False, True],
+        )
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote._run_account", new_callable=AsyncMock)
     async def test_auth_captcha_is_not_retried(self, run_account, _sleep, _print):
         run_account.return_value = [
             {"bot_id": "all", "status": "captcha_required", "detail": "captcha", "account_id": "id"}
@@ -657,6 +676,31 @@ class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
             tab, "screenshots/auth_id_captcha.png", required=True
         )
         oauth_login.assert_not_awaited()
+        browser.aclose.assert_awaited_once()
+    @patch("builtins.print")
+    @patch("vote.browser_screenshot", new_callable=AsyncMock)
+    @patch("vote.discord_oauth_login", new_callable=AsyncMock)
+    @patch("vote.start_browser", new_callable=AsyncMock)
+    async def test_auth_failure_captures_screenshot_when_requested(
+        self, start_browser, oauth_login, screenshot, _print
+    ):
+        browser = MagicMock()
+        tab = AsyncMock()
+        browser.__iter__.return_value = iter([tab])
+        browser.aclose = AsyncMock()
+        start_browser.return_value = browser
+        oauth_login.return_value = vote.AUTH_INVALID
+        screenshot.return_value = "screenshots/auth_id_failed.png"
+
+        results = await vote._run_account(
+            "token", ["111"], "id", capture_auth_failure=True
+        )
+
+        self.assertEqual(results[0]["status"], "auth_failed")
+        self.assertEqual(results[0]["screenshot_path"], "screenshots/auth_id_failed.png")
+        screenshot.assert_awaited_once_with(
+            tab, "screenshots/auth_id_failed.png", required=True
+        )
         browser.aclose.assert_awaited_once()
 
 
@@ -1034,6 +1078,30 @@ class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await vote.send_captcha_screenshots([[result]]), 1)
             self.assertFalse(os.path.exists(path))
         send_photo.assert_called_once()
+
+    @patch("builtins.print")
+    @patch("vote.send_telegram_photo", return_value=True)
+    async def test_auth_failure_photos_are_deduplicated_escaped_and_deleted(self, send_photo, _print):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "auth.png")
+            with open(path, "wb") as file:
+                file.write(b"png")
+            result = {
+                "account_id": "a&b",
+                "bot_id": "all",
+                "status": "auth_failed",
+                "detail": "Top.gg authentication <failed>",
+                "screenshot_path": path,
+            }
+
+            sent = await vote.send_auth_failure_screenshots([[result, dict(result)]])
+
+            self.assertEqual(sent, 1)
+            self.assertFalse(os.path.exists(path))
+        send_photo.assert_called_once()
+        caption = send_photo.call_args.args[1]
+        self.assertIn("Account a&amp;b", caption)
+        self.assertIn("Top.gg authentication &lt;failed&gt;", caption)
 
 
 if __name__ == "__main__":
