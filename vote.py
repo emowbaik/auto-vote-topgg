@@ -240,6 +240,38 @@ async def send_captcha_screenshots(all_results: list[list[dict]]) -> int:
     return sent_count
 
 
+async def send_auth_failure_screenshots(all_results: list[list[dict]]) -> int:
+    """Send final auth failure screenshots after the text report, then delete local evidence."""
+    sent_count = 0
+    handled_paths: set[str] = set()
+    for account_results in all_results:
+        for result in account_results:
+            if result.get("status") != "auth_failed":
+                continue
+            path = result.get("screenshot_path")
+            if not isinstance(path, str) or not path or path in handled_paths:
+                continue
+            handled_paths.add(path)
+            account_id = escape(str(result.get("account_id", "?")))
+            detail = escape(str(result.get("detail", "Top.gg authentication failed")))
+            caption = (
+                "❌ <b>Auth Failure Browser Screenshot</b>\n"
+                f"👤 Account {account_id}\n"
+                f"{detail}"
+            )
+            try:
+                sent = await asyncio.to_thread(send_telegram_photo, path, caption)
+                sent_count += int(sent)
+                print(
+                    "  📸 Auth failure screenshot sent to Telegram"
+                    if sent else "  ⚠️  Could not send auth failure screenshot to Telegram"
+                )
+            finally:
+                with suppress(OSError):
+                    Path(path).unlink()
+    return sent_count
+
+
 def load_tokens(raw: str | None = None) -> list[str]:
     if raw is None:
         raw = os.environ.get("TOKENS", "")
@@ -1116,6 +1148,8 @@ async def _run_account(
     bot_ids: list[str],
     account_id: str,
     account_cookies: list[dict] | None = None,
+    *,
+    capture_auth_failure: bool = False,
 ) -> list[dict]:
     browser = await start_browser()
     tab = next(iter(browser))
@@ -1145,12 +1179,21 @@ async def _run_account(
                 result["screenshot_path"] = path
             return [result]
         if auth_state != AUTHENTICATED:
-            return [{
+            result = {
                 "bot_id": "all",
                 "status": "auth_failed",
                 "detail": "Top.gg authentication failed",
                 "account_id": account_id,
-            }]
+            }
+            if capture_auth_failure:
+                path = await browser_screenshot(
+                    tab,
+                    f"screenshots/auth_{account_id}_failed.png",
+                    required=True,
+                )
+                if path:
+                    result["screenshot_path"] = path
+            return [result]
 
         for position, bot_id in enumerate(bot_ids):
             result = await vote_for_bot(tab, bot_id, account_id)
@@ -1193,7 +1236,11 @@ async def process_account(
             await asyncio.sleep(RETRY_DELAY_SEC)
         try:
             attempt_results = await _run_account(
-                token, pending, account_id, account_cookies
+                token,
+                pending,
+                account_id,
+                account_cookies,
+                capture_auth_failure=attempt == MAX_RETRIES,
             )
         except Exception as exc:
             if isinstance(exc, BrowserStartupError):
@@ -1309,6 +1356,7 @@ async def main() -> int:
     report = build_notification(all_results, now)
     send_notification(report)
     await send_captcha_screenshots(all_results)
+    await send_auth_failure_screenshots(all_results)
     return 1 if has_business_failure(all_results) else 0
 
 

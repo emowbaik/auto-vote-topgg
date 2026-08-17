@@ -21,7 +21,7 @@ Automated daily voting bot for [top.gg](https://top.gg) using nodriver (visible 
 - 🔄 **Browser startup fresh-run retry** — runner-local Chrome startup failure automatically dispatches one fresh-runner retry
 - 📨 **Telegram notifications** — chunked per-account reports with privacy-safe account fingerprints
 - 🔁 **Scoped retry** — retries transient authentication and bot failures without repeating final results
-- 📸 **CAPTCHA evidence** — always captures CAPTCHA pages for private Telegram; other error screenshots remain opt-in
+- 📸 **Failure evidence** — always captures CAPTCHA pages and final auth failures for private Telegram; other error screenshots remain opt-in
 - 🚦 **Truthful CI status** — incomplete votes report to Telegram, then fail the workflow
 - 🧹 **Auto-cleanup** — keeps the latest 10 completed GitHub Actions runs repository-wide
 - 📌 **Reproducible builds** — Python packages and GitHub Actions are pinned to tested immutable versions
@@ -180,9 +180,9 @@ set DEBUG=1 && python vote.py
 DEBUG=1 python vote.py
 ```
 
-Non-CAPTCHA error screenshots remain disabled unless `SEND_ERROR_SCREENSHOTS=1` is set.
+Non-CAPTCHA error screenshots remain disabled unless `SEND_ERROR_SCREENSHOTS=1` is set, except final top.gg authentication failures which are captured automatically on the last retry.
 
-CAPTCHA/Turnstile challenges are solved first with nodriver `verify_cf()` wherever they appear: top.gg cookie authentication, Discord OAuth, before voting, after clicking `Vote`, and after vote verification reload. top.gg privacy-consent overlays are checked repeatedly after page open/reload, then dismissed before auth probes, every marked click, vote interaction, and solver clicks so they cannot cover the checkbox or `Vote` button. If privacy-modal dismissal fails while the modal is detected, one screenshot plus the dismiss error is sent to Telegram. If solver cannot clear the challenge, the current browser page is captured when possible and sent to the configured Telegram chat immediately after the text report. No `SEND_ERROR_SCREENSHOTS` secret is required for CAPTCHA evidence.
+CAPTCHA/Turnstile challenges are solved first with nodriver `verify_cf()` wherever they appear: top.gg cookie authentication, Discord OAuth, before voting, after clicking `Vote`, and after vote verification reload. top.gg privacy-consent overlays are checked repeatedly after page open/reload, then dismissed before auth probes, every marked click, vote interaction, and solver clicks so they cannot cover the checkbox or `Vote` button. If privacy-modal dismissal fails while the modal is detected, one screenshot plus the dismiss error is sent to Telegram. If solver cannot clear the challenge, the current browser page is captured when possible and sent to the configured Telegram chat immediately after the text report. Final `auth_failed` results also capture the last browser state and send it after the text report. No `SEND_ERROR_SCREENSHOTS` secret is required for CAPTCHA or final auth-failure evidence.
 
 For other GitHub Actions diagnostics, add repository secret `SEND_ERROR_SCREENSHOTS=1`. Error and uncertain states then send screenshots to configured Telegram chat. Keep chat private: screenshots may contain Discord username, avatar, or top.gg account details. Screenshots are never uploaded as GitHub artifacts and local files are deleted after each Telegram delivery attempt.
 
@@ -203,7 +203,7 @@ Transient authentication/browser failures retry up to 3 times. In multi-bot runs
 ```text
 auto-vote-topgg/
 ├── vote.py                          # Auth, vote, cooldown state, report, browser lifecycle
-├── test_vote.py                     # 78 unit/regression tests
+├── test_vote.py                     # 81 unit/regression tests
 ├── audit_dependencies.py            # Stdlib OSV dependency audit
 ├── requirements.txt                 # Direct Python dependencies
 ├── requirements.lock                # Linux/Python 3.11 hashes and transitive pins
