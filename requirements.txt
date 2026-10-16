@@ -1,3 +1,3 @@
-nodriver==0.50.3
+nodriver==0.50.6
 opencv-python-headless==5.0.0.93
 requests==2.34.2; python_version >= "3.11"
