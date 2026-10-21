@@ -84,6 +84,44 @@ TOPGG_PROXY=http://host:port python scripts/check_proxy.py
 > of them reached top.gg without still being served the Cloudflare challenge.
 > Residential egress is the requirement, not merely a working proxy.
 
+## WARP Egress (recommended free path)
+
+top.gg's edge challenges datacenter ranges hard. A Cloudflare WARP egress is
+not challenged the same way and costs nothing.
+
+Enable it by setting the repository variable `TOPGG_USE_WARP` to `true`. The
+workflow then installs the official `warp-cli`, registers, connects in proxy
+mode, and exports `TOPGG_PROXY_AUTO=socks5://127.0.0.1:40000` for the run.
+
+```bash
+gh variable set TOPGG_USE_WARP -b true --repo emowbaik/auto-vote-topgg
+```
+
+Measured on 2026-10-21, top.gg through a WARP exit:
+
+| Probe | Result |
+|---|---|
+| runner egress (no WARP) | `Just a moment...` / `Performing security verification` (HTTP 403) |
+| WARP exit | `AS13335 Cloudflare, Inc.`, `hosting=false`, HTTP 200, real vote page |
+
+The official client is used on purpose: raw WireGuard UDP is filtered on both
+GitHub-hosted runners and this VPS (ports 2408, 500, 1701 and 4500 all time
+out), while `warp-cli` connects over a transport that is not filtered.
+
+### The `Accept` header matters
+
+A session probe without an explicit `Accept` header is challenged, even from a
+cleared WARP exit:
+
+| Request | Result |
+|---|---|
+| `fetch('/api/auth/session', {credentials: 'include'})` | HTTP 403, `cf-mitigated: challenge` |
+| `fetch('/api/auth/session', {credentials: 'include', headers: {'Accept': 'application/json, text/plain, */*'}})` | HTTP 200, `application/json` |
+
+The probe therefore always sends the JSON `Accept` header, and the consent
+overlay is fully settled before probing. A blocked XHR is never treated as an
+invalid session.
+
 ## Setup
 
 ### 1. Fork this repository

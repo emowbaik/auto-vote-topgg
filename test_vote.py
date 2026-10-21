@@ -1357,3 +1357,97 @@ class ProxyContextTests(unittest.IsolatedAsyncioTestCase):
         await vote._run_account("token", ["111"], "id", [{"name": "authjs"}])
 
         browser.create_context.assert_not_called()
+
+
+class WarpProxyTests(unittest.IsolatedAsyncioTestCase):
+    """WARP auto-detected egress must be used when no secret proxy is set."""
+
+    @patch("builtins.print")
+    @patch("vote.send_notification")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.process_account", new_callable=AsyncMock)
+    @patch("vote.load_topgg_cookies", return_value=[])
+    @patch("vote.load_bot_ids", return_value=["111"])
+    @patch("vote.load_tokens", return_value=["token"])
+    async def test_auto_proxy_is_used_when_secret_absent(
+        self, _tokens, _bots, _cookies, process_account, _sleep, _notify, _print
+    ):
+        process_account.return_value = []
+        def fake_consume(name):
+            if name == "TOPGG_PROXY":
+                return ""
+            if name == "TOKENS":
+                return "token"
+            if name == "TOPGG_COOKIES_JSON":
+                return ""
+            return ""
+
+        with patch.dict(os.environ, {"TOPGG_PROXY_AUTO": "socks5://127.0.0.1:40000"}, clear=False):
+            with patch("vote.consume_secret", side_effect=fake_consume):
+                await vote.main()
+
+        self.assertEqual(vote.PROXY_SERVER, "socks5://127.0.0.1:40000")
+
+    @patch("builtins.print")
+    @patch("vote.send_notification")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.process_account", new_callable=AsyncMock)
+    @patch("vote.load_topgg_cookies", return_value=[])
+    @patch("vote.load_bot_ids", return_value=["111"])
+    @patch("vote.load_tokens", return_value=["token"])
+    async def test_secret_proxy_wins_over_auto(
+        self, _tokens, _bots, _cookies, process_account, _sleep, _notify, _print
+    ):
+        process_account.return_value = []
+        def fake_consume(name):
+            if name == "TOPGG_PROXY":
+                return "http://1.2.3.4:8080"
+            if name == "TOKENS":
+                return "token"
+            if name == "TOPGG_COOKIES_JSON":
+                return ""
+            return ""
+
+        with patch.dict(os.environ, {"TOPGG_PROXY_AUTO": "socks5://127.0.0.1:40000"}, clear=False):
+            with patch("vote.consume_secret", side_effect=fake_consume):
+                await vote.main()
+
+        self.assertEqual(vote.PROXY_SERVER, "http://1.2.3.4:8080")
+
+    def test_socks_proxy_url_is_described_without_credentials(self):
+        described = vote.describe_proxy("socks5://127.0.0.1:40000")
+        self.assertIn("127.0.0.1", described)
+        self.assertIn("no auth", described)
+        self.assertIn("socks5", described)
+
+
+class PrivacyOverlayProbeOrderTests(unittest.IsolatedAsyncioTestCase):
+    """The session probe must not run while the consent overlay is up."""
+
+    @patch("vote.settle_privacy_overlay", new_callable=AsyncMock)
+    @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)
+    @patch("vote.is_edge_challenge", new_callable=AsyncMock)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock)
+    @patch("vote.topgg_session_probe", new_callable=AsyncMock)
+    async def test_auth_state_settles_overlay_before_probing(
+        self, probe, turnstile, edge, dismiss, settle
+    ):
+        calls = []
+        probe.return_value = vote.AUTHENTICATED
+
+        async def record_settle(_tab):
+            calls.append("settle")
+
+        async def record_probe(_tab):
+            calls.append("probe")
+            return vote.AUTHENTICATED
+
+        settle.side_effect = record_settle
+        probe.side_effect = record_probe
+        turnstile.return_value = False
+        edge.return_value = False
+
+        result = await vote.topgg_auth_state(AsyncMock())
+
+        self.assertEqual(result, vote.AUTHENTICATED)
+        self.assertEqual(calls, ["settle", "probe"])

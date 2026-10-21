@@ -750,7 +750,10 @@ async def is_edge_challenge(tab: Any) -> bool:
 async def is_topgg_authenticated(tab: Any) -> bool:
     result = await evaluate(tab, """(async () => {
         try {
-            const response = await fetch('/api/auth/session', {credentials: 'include'});
+            const response = await fetch('/api/auth/session', {
+                credentials: 'include',
+                headers: {'Accept': 'application/json, text/plain, */*'}
+            });
             if (!response.ok) return false;
             const session = await response.json();
             return Boolean(session && session.user);
@@ -770,7 +773,10 @@ async def topgg_session_probe(tab: Any) -> str:
     """
     result = await evaluate(tab, """(async () => {
         try {
-            const response = await fetch('/api/auth/session', {credentials: 'include'});
+            const response = await fetch('/api/auth/session', {
+                credentials: 'include',
+                headers: {'Accept': 'application/json, text/plain, */*'}
+            });
             const contentType = response.headers.get('content-type') || '';
             let payload = null;
             try { payload = await response.json(); } catch (_) { payload = null; }
@@ -795,7 +801,10 @@ async def topgg_session_probe(tab: Any) -> str:
 
 
 async def topgg_auth_state(tab: Any) -> str:
-    await dismiss_privacy_overlay(tab)
+    # The session probe is an XHR. While the consent overlay is still up, the
+    # edge answers that XHR with a challenge document instead of JSON, so the
+    # overlay has to be fully dismissed and allowed to settle before probing.
+    await settle_privacy_overlay(tab)
     probe = await topgg_session_probe(tab)
     if probe == AUTHENTICATED:
         return AUTHENTICATED
@@ -1480,6 +1489,10 @@ async def main() -> int:
     # consume_secret removes the variable from the environment, so the proxy
     # URL has to be captured here and handed to the browser explicitly.
     PROXY_SERVER = consume_secret("TOPGG_PROXY").strip()
+    if not PROXY_SERVER:
+        # Auto-detected egress, for example a locally running WARP SOCKS
+        # proxy. It is not a credential, so it is read directly.
+        PROXY_SERVER = os.environ.get("TOPGG_PROXY_AUTO", "").strip()
     tokens = load_tokens(tokens_raw)
     SENSITIVE_VALUES = [
         tokens_raw,
