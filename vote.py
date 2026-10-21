@@ -707,7 +707,16 @@ async def settle_privacy_overlay(tab: Any, attempts: int = 4, delay: float = 0.7
     return dismissed
 
 
-async def inject_topgg_cookies(browser: Any, cookies: list[dict]) -> None:
+async def inject_topgg_cookies(browser: Any, cookies: list[dict], tab: Any = None) -> None:
+    """Install the top.gg cookies into the browsing context that will vote.
+
+    browser.cookies.set_all() writes into the browser's default context. When a
+    dedicated proxy context is used for the voting tab, that is a different
+    cookie store, so the session cookie never reaches the page and the session
+    API answers "null" even though the cookie is valid. Setting the cookies
+    through the tab's own CDP session targets the context that actually
+    requests top.gg.
+    """
     params = []
     for cookie in cookies:
         same_site = uc.cdp.network.CookieSameSite(cookie["sameSite"])
@@ -722,8 +731,12 @@ async def inject_topgg_cookies(browser: Any, cookies: list[dict]) -> None:
             same_site=same_site,
             expires=expires,
         ))
-    if params:
-        await browser.cookies.set_all(params)
+    if not params:
+        return
+    if tab is not None:
+        await tab.send(uc.cdp.network.set_cookies(cookies=params))
+        return
+    await browser.cookies.set_all(params)
 
 
 async def is_edge_challenge(tab: Any) -> bool:
@@ -858,7 +871,7 @@ async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) 
     if not cookies:
         return AUTH_INVALID
     print("  → Injecting top.gg Auth.js cookies...")
-    await inject_topgg_cookies(tab.browser, cookies)
+    await inject_topgg_cookies(tab.browser, cookies, tab)
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(3)
     await settle_privacy_overlay(tab)
