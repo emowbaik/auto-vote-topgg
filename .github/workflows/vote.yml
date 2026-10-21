@@ -84,7 +84,15 @@ jobs:
           set +e
           xvfb-run -a -s "-screen 0 1280x720x24" python vote.py
           status=$?
-          echo "status=$status" >> "$GITHUB_OUTPUT"
+          # Never publish a bare numeric status as a job output: GitHub secret
+          # scanning redacts outputs that look like a secret value, which
+          # silently drops the output and breaks downstream gates. Emit a
+          # non-numeric token instead.
+          if [ "$status" -eq 0 ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+          fi
           exit 0
 
       - name: Validate cooldown schedule
@@ -135,7 +143,11 @@ jobs:
         if: always()
         env:
           STATUS: ${{ steps.run_vote.outputs.status }}
-        run: exit "${STATUS:-1}"
+        run: |
+          if [ "${STATUS:-fail}" = "ok" ]; then
+            exit 0
+          fi
+          exit 1
 
     continue-on-error: true
 
@@ -148,7 +160,11 @@ jobs:
       - name: Apply vote result
         env:
           VOTE_STATUS: ${{ needs.vote.outputs.vote_status }}
-        run: test "$VOTE_STATUS" = "0"
+        run: |
+          if [ "${VOTE_STATUS:-fail}" = "ok" ]; then
+            exit 0
+          fi
+          exit 1
 
   browser-startup-retry:
     needs: vote

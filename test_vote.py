@@ -1106,3 +1106,67 @@ class ScreenshotPrivacyTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrowserStartupCleanupTests(unittest.IsolatedAsyncioTestCase):
+    """Cleanup failure must never mask the real browser startup error."""
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.chrome_process_diagnostics", new_callable=AsyncMock)
+    @patch("vote.close_browser", new_callable=AsyncMock)
+    @patch("vote.scrub_browser_environment")
+    @patch("vote.uc.Browser")
+    async def test_cleanup_failure_does_not_mask_startup_error(
+        self, browser_cls, _scrub, close_browser, _diag, _sleep, _print
+    ):
+        browser = MagicMock()
+        browser.start = AsyncMock(side_effect=OSError("chrome died"))
+        browser_cls.return_value = browser
+        close_browser.side_effect = vote.BrowserCleanupError(
+            "Chrome process did not terminate cleanly"
+        )
+
+        with self.assertRaises(vote.BrowserStartupError) as caught:
+            await vote.start_browser()
+
+        self.assertIn("chrome died", str(caught.exception))
+        self.assertNotIsInstance(caught.exception, vote.BrowserCleanupError)
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.chrome_process_diagnostics", new_callable=AsyncMock)
+    @patch("vote.close_browser", new_callable=AsyncMock)
+    @patch("vote.scrub_browser_environment")
+    @patch("vote.uc.Browser")
+    async def test_startup_error_detail_survives_cleanup_failure(
+        self, browser_cls, _scrub, close_browser, _diag, _sleep, _print
+    ):
+        browser = MagicMock()
+        browser.start = AsyncMock(side_effect=OSError("chrome died"))
+        browser_cls.return_value = browser
+        close_browser.side_effect = vote.BrowserCleanupError("cleanup failed")
+
+        with self.assertRaises(vote.BrowserStartupError) as caught:
+            await vote.start_browser()
+
+        detail = str(caught.exception)
+        self.assertIn("chrome died", detail)
+        self.assertNotIn("cleanup failed", detail)
+
+
+class ScreenshotFlagTests(unittest.TestCase):
+    def test_send_error_screenshots_accepts_on_token(self):
+        for value in ("on", "ON", "1", "true", "yes"):
+            with patch.dict(os.environ, {"SEND_ERROR_SCREENSHOTS": value}):
+                with patch("vote._load_dotenv"):
+                    import importlib
+
+                    reloaded = importlib.reload(vote)
+                    self.assertTrue(reloaded.SEND_ERROR_SCREENSHOTS, value)
+        with patch.dict(os.environ, {"SEND_ERROR_SCREENSHOTS": ""}):
+            import importlib
+
+            reloaded = importlib.reload(vote)
+            self.assertFalse(reloaded.SEND_ERROR_SCREENSHOTS)
+        importlib.reload(vote)
