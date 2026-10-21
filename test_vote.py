@@ -374,7 +374,7 @@ class MainExitTests(unittest.IsolatedAsyncioTestCase):
         self, _tokens, _bots, _cookies, process_account, send_notification, _print,
         consume_secret,
     ):
-        consume_secret.side_effect = ["token", "", "", ""]
+        consume_secret.side_effect = ["token", "", "", "", ""]
         process_account.return_value = [
             {"account_id": "id", "bot_id": "111", "status": "captcha_required", "detail": "captcha"}
         ]
@@ -908,7 +908,7 @@ class FullOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            patch("vote.consume_secret", side_effect=["token", "cookies", "", ""]),
+            patch("vote.consume_secret", side_effect=["token", "cookies", "", "", ""]),
             patch("vote.load_tokens", return_value=["token"]),
             patch("vote.load_bot_ids", return_value=["111"]),
             patch("vote.load_topgg_cookies", return_value=account_cookies),
@@ -951,7 +951,7 @@ class FullOrchestrationTests(unittest.IsolatedAsyncioTestCase):
             return 1
 
         with (
-            patch("vote.consume_secret", side_effect=["token", "", "telegram", "chat"]),
+            patch("vote.consume_secret", side_effect=["token", "", "telegram", "chat", ""]),
             patch("vote.load_tokens", return_value=["token"]),
             patch("vote.load_bot_ids", return_value=["111"]),
             patch("vote.load_topgg_cookies", return_value=[]),
@@ -1170,3 +1170,190 @@ class ScreenshotFlagTests(unittest.TestCase):
             reloaded = importlib.reload(vote)
             self.assertFalse(reloaded.SEND_ERROR_SCREENSHOTS)
         importlib.reload(vote)
+
+
+class EdgeChallengeTests(unittest.IsolatedAsyncioTestCase):
+    """A Cloudflare edge block must never be read as an invalid session."""
+
+    @patch("vote.evaluate", new_callable=AsyncMock)
+    async def test_session_probe_reports_authenticated(self, evaluate):
+        evaluate.return_value = {
+            "status": 200, "contentType": "application/json", "hasUser": True, "isJson": True,
+        }
+        self.assertEqual(await vote.topgg_session_probe(AsyncMock()), vote.AUTHENTICATED)
+
+    @patch("vote.evaluate", new_callable=AsyncMock)
+    async def test_session_probe_reports_challenged_on_403(self, evaluate):
+        evaluate.return_value = {
+            "status": 403, "contentType": "text/html", "hasUser": False, "isJson": False,
+        }
+        self.assertEqual(await vote.topgg_session_probe(AsyncMock()), vote.AUTH_CHALLENGED)
+
+    @patch("vote.evaluate", new_callable=AsyncMock)
+    async def test_session_probe_reports_challenged_on_non_json(self, evaluate):
+        evaluate.return_value = {
+            "status": 200, "contentType": "text/html", "hasUser": False, "isJson": False,
+        }
+        self.assertEqual(await vote.topgg_session_probe(AsyncMock()), vote.AUTH_CHALLENGED)
+
+    @patch("vote.evaluate", new_callable=AsyncMock)
+    async def test_session_probe_reports_invalid_on_json_without_user(self, evaluate):
+        evaluate.return_value = {
+            "status": 200, "contentType": "application/json", "hasUser": False, "isJson": True,
+        }
+        self.assertEqual(await vote.topgg_session_probe(AsyncMock()), vote.AUTH_INVALID)
+
+    @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock)
+    @patch("vote.topgg_session_probe", new_callable=AsyncMock)
+    async def test_auth_state_returns_challenged_without_turnstile(self, probe, turnstile, _overlay):
+        probe.return_value = vote.AUTH_CHALLENGED
+        turnstile.return_value = False
+        self.assertEqual(await vote.topgg_auth_state(AsyncMock()), vote.AUTH_CHALLENGED)
+
+    @patch("vote.dismiss_privacy_overlay", new_callable=AsyncMock)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock)
+    @patch("vote.is_edge_challenge", new_callable=AsyncMock)
+    @patch("vote.topgg_session_probe", new_callable=AsyncMock)
+    async def test_auth_state_detects_challenge_page_when_probe_is_invalid(
+        self, probe, edge, turnstile, _overlay
+    ):
+        probe.return_value = vote.AUTH_INVALID
+        turnstile.return_value = False
+        edge.return_value = True
+        self.assertEqual(await vote.topgg_auth_state(AsyncMock()), vote.AUTH_CHALLENGED)
+
+    def test_challenged_status_is_terminal_not_retryable(self):
+        self.assertFalse(vote.is_retryable_result({"status": "challenged"}))
+        self.assertIn("challenged", vote.FINAL_STATUSES)
+
+    def test_challenge_related_result_is_detected(self):
+        self.assertTrue(vote.is_challenge_related_result({"status": "challenged"}))
+        self.assertTrue(vote.is_challenge_related_result({"detail": "edge challenge blocked"}))
+        self.assertFalse(vote.is_challenge_related_result({"status": "error", "detail": "x"}))
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote._run_account", new_callable=AsyncMock)
+    async def test_challenged_account_is_not_retried(self, run_account, _sleep, _print):
+        run_account.return_value = [
+            {"bot_id": "all", "status": "challenged", "detail": "top.gg edge challenge blocked authentication"}
+        ]
+        results = await vote.process_account("token", ["111"], 1, 1)
+        self.assertEqual(results[0]["status"], "challenged")
+        self.assertEqual(run_account.await_count, 1)
+
+
+class ProxyAndCookieTests(unittest.TestCase):
+    def test_cloudflare_clearance_cookie_is_preserved(self):
+        raw = json.dumps([
+            {"name": "__Secure-authjs.session-token", "value": "v", "domain": ".top.gg", "path": "/"},
+            {"name": "cf_clearance", "value": "c", "domain": ".top.gg", "path": "/"},
+        ])
+        cookies = vote.load_topgg_cookies(1, raw)
+        names = {c["name"] for c in cookies[0]}
+        self.assertIn("cf_clearance", names)
+        self.assertIn("__Secure-authjs.session-token", names)
+
+    def test_cloudflare_cookies_are_injected_before_authjs(self):
+        raw = json.dumps([
+            {"name": "__Secure-authjs.session-token", "value": "v", "domain": ".top.gg", "path": "/"},
+            {"name": "cf_clearance", "value": "c", "domain": ".top.gg", "path": "/"},
+        ])
+        cookies = vote.load_topgg_cookies(1, raw)
+        self.assertEqual(cookies[0][0]["name"], "cf_clearance")
+
+    def test_non_topgg_cloudflare_cookie_is_ignored(self):
+        raw = json.dumps([
+            {"name": "__Secure-authjs.session-token", "value": "v", "domain": ".top.gg", "path": "/"},
+            {"name": "cf_clearance", "value": "c", "domain": ".example.com", "path": "/"},
+        ])
+        cookies = vote.load_topgg_cookies(1, raw)
+        self.assertNotIn("cf_clearance", {c["name"] for c in cookies[0]})
+
+    def test_describe_proxy_redacts_credentials(self):
+        described = vote.describe_proxy("http://user:secretpass@1.2.3.4:8080")
+        self.assertNotIn("secretpass", described)
+        self.assertNotIn("user", described)
+        self.assertIn("1.2.3.4", described)
+        self.assertIn("with auth", described)
+
+    def test_describe_proxy_handles_empty(self):
+        self.assertEqual(vote.describe_proxy(""), "none (direct)")
+
+    def test_describe_proxy_handles_bare_host_port(self):
+        described = vote.describe_proxy("1.2.3.4:8080")
+        self.assertIn("1.2.3.4", described)
+        self.assertIn("no auth", described)
+
+    def test_scrub_removes_proxy_from_environment(self):
+        with patch.dict(os.environ, {"TOPGG_PROXY": "http://1.2.3.4:8080"}, clear=False):
+            vote.scrub_browser_environment()
+            self.assertNotIn("TOPGG_PROXY", os.environ)
+
+
+class ProxyContextTests(unittest.IsolatedAsyncioTestCase):
+    """A configured proxy must put the automation tab behind the proxy."""
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.vote_for_bot", new_callable=AsyncMock)
+    @patch("vote.login_with_cookies", new_callable=AsyncMock)
+    @patch("vote.start_browser", new_callable=AsyncMock)
+    async def test_proxy_creates_dedicated_context(self, start_browser, cookie_login, vote_for_bot, _sleep, _print):
+        browser = MagicMock()
+        browser._proxy_server = "http://1.2.3.4:8080"
+        context_tab = AsyncMock()
+        browser.create_context = AsyncMock(return_value=context_tab)
+        browser.aclose = AsyncMock()
+        start_browser.return_value = browser
+        cookie_login.return_value = vote.AUTHENTICATED
+        vote_for_bot.return_value = {"bot_id": "111", "status": "success", "detail": "ok"}
+
+        results = await vote._run_account("token", ["111"], "id", [{"name": "authjs"}])
+
+        self.assertEqual(results[0]["status"], "success")
+        browser.create_context.assert_awaited_once()
+        kwargs = browser.create_context.await_args.kwargs
+        self.assertEqual(kwargs["proxy_server"], "http://1.2.3.4:8080")
+        vote_for_bot.assert_awaited_once_with(context_tab, "111", "id")
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.vote_for_bot", new_callable=AsyncMock)
+    @patch("vote.login_with_cookies", new_callable=AsyncMock)
+    @patch("vote.start_browser", new_callable=AsyncMock)
+    async def test_no_proxy_uses_default_tab(self, start_browser, cookie_login, vote_for_bot, _sleep, _print):
+        browser = MagicMock()
+        browser._proxy_server = ""
+        tab = AsyncMock()
+        browser.__iter__.return_value = iter([tab])
+        browser.aclose = AsyncMock()
+        start_browser.return_value = browser
+        cookie_login.return_value = vote.AUTHENTICATED
+        vote_for_bot.return_value = {"bot_id": "111", "status": "success", "detail": "ok"}
+
+        results = await vote._run_account("token", ["111"], "id", [{"name": "authjs"}])
+
+        self.assertEqual(results[0]["status"], "success")
+        browser.create_context.assert_not_called()
+        vote_for_bot.assert_awaited_once_with(tab, "111", "id")
+
+    @patch("builtins.print")
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.vote_for_bot", new_callable=AsyncMock)
+    @patch("vote.login_with_cookies", new_callable=AsyncMock)
+    @patch("vote.start_browser", new_callable=AsyncMock)
+    async def test_non_string_proxy_attribute_is_ignored(self, start_browser, cookie_login, vote_for_bot, _sleep, _print):
+        browser = MagicMock()
+        browser._proxy_server = MagicMock()
+        tab = AsyncMock()
+        browser.__iter__.return_value = iter([tab])
+        browser.aclose = AsyncMock()
+        start_browser.return_value = browser
+        cookie_login.return_value = vote.AUTHENTICATED
+        vote_for_bot.return_value = {"bot_id": "111", "status": "success", "detail": "ok"}
+
+        await vote._run_account("token", ["111"], "id", [{"name": "authjs"}])
+
+        browser.create_context.assert_not_called()

@@ -61,6 +61,7 @@ jobs:
           TG_CHAT_ID:                ${{ secrets.TG_CHAT_ID }}
           SEND_ERROR_SCREENSHOTS:    ${{ secrets.SEND_ERROR_SCREENSHOTS }}
           TOPGG_COOKIES_JSON:        ${{ secrets.TOPGG_COOKIES_JSON }}
+          TOPGG_PROXY:               ${{ secrets.TOPGG_PROXY }}
         run: |
           secret_dir="$(mktemp -d)"
           chmod 700 "$secret_dir"
@@ -78,7 +79,8 @@ jobs:
           write_secret TOPGG_COOKIES_JSON "$TOPGG_COOKIES_JSON"
           write_secret TG_BOT_TOKEN "$TG_BOT_TOKEN"
           write_secret TG_CHAT_ID "$TG_CHAT_ID"
-          unset TOKENS TOPGG_COOKIES_JSON TG_BOT_TOKEN TG_CHAT_ID
+          write_secret TOPGG_PROXY "$TOPGG_PROXY"
+          unset TOKENS TOPGG_COOKIES_JSON TG_BOT_TOKEN TG_CHAT_ID TOPGG_PROXY
           export NEXT_VOTE_STATE_FILE="$RUNNER_TEMP/next-vote.json"
           export BROWSER_RETRY_STATE_FILE="$RUNNER_TEMP/browser-startup-retry.json"
           set +e

@@ -42,6 +42,48 @@ top.gg authenticated
     └── verified → click Vote → confirm success/cooldown
 ```
 
+## Edge Challenge and Proxy Support
+
+top.gg sits behind a Cloudflare edge challenge ("Just a moment..." / "Performing
+security verification"). The challenge intercepts **every** request, including
+`/api/auth/session`, so a blocked request is not evidence of an invalid session.
+
+- `is_edge_challenge()` detects the interstitial by title, body text, and challenge DOM markers.
+- `topgg_session_probe()` classifies the session API result as `authenticated`, `invalid`, or `challenged`. A `403`/`429`/`503` or a non-JSON body means the edge blocked the request, so the cookie is treated as **unknown**, not expired.
+- A blocked account is reported with status `challenged` and is **terminal** — the challenge cannot be cleared by retrying from the same runner IP, so all three retries are skipped instead of burning the budget.
+
+### Cloudflare clearance cookies
+
+The cookie export filter keeps Auth.js session cookies **and** Cloudflare
+clearance cookies (`cf_clearance`, `cf_chl_2`, `__cf_bm`, `_cfuvid`). Clearance
+cookies are what let a browser skip the challenge, so dropping them guarantees
+that a browser which already passed the challenge still gets challenged on
+every run. Export them from a browser session that has already passed the
+challenge, and keep the export fresh — Auth.js sessions expire after roughly
+30 days.
+
+### `TOPGG_PROXY` (optional)
+
+Set the `TOPGG_PROXY` secret to route the automation through a proxy:
+
+```
+TOPGG_PROXY=http://user:password@host:port
+```
+
+- The tab is created in a dedicated browser context with the proxy attached, so cookies and every request go through it.
+- The URL is consumed as a secret, scrubbed from the environment before Chrome starts, and never printed; the run log only shows `scheme://host:port (with auth)`.
+- Validated with `scripts/check_proxy.py`, which reports whether the exit reaches top.gg or is still challenged:
+
+```bash
+TOPGG_PROXY=http://host:port python scripts/check_proxy.py
+```
+
+> Free public proxy lists (TheSpeedX, ProxyScrape, and similar) are **not**
+> sufficient here. Measured on 2026-10-21: of 2,965 listed HTTP proxies only
+> 211 (8.9%) were functionally able to reach the internet at all, and **none**
+> of them reached top.gg without still being served the Cloudflare challenge.
+> Residential egress is the requirement, not merely a working proxy.
+
 ## Setup
 
 ### 1. Fork this repository

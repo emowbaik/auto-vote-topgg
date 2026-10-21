@@ -26,7 +26,7 @@ DELAY_BETWEEN_BOTS_SEC = 3
 DELAY_BETWEEN_ACCOUNTS_SEC = 5
 MAX_RETRIES = 3
 RETRY_DELAY_SEC = 10
-FINAL_STATUSES = frozenset({"success", "cooldown", "captcha_required"})
+FINAL_STATUSES = frozenset({"success", "cooldown", "captcha_required", "challenged"})
 COMPLETED_STATUSES = frozenset({"success", "cooldown"})
 TRANSIENT_STATUSES = frozenset({"error", "auth_failed", "uncertain"})
 BROWSER_START_RETRIES = 5
@@ -34,6 +34,14 @@ BROWSER_START_RETRY_SEC = 2
 AUTHENTICATED = "authenticated"
 AUTH_INVALID = "invalid"
 AUTH_CAPTCHA_REQUIRED = "captcha_required"
+AUTH_CHALLENGED = "challenged"
+AUTH_BLOCKED_STATUSES = frozenset({403, 429, 503})
+CLOUDFLARE_COOKIE_NAMES = frozenset({
+    "cf_clearance",
+    "cf_chl_2",
+    "__cf_bm",
+    "_cfuvid",
+})
 TELEGRAM_MESSAGE_LIMIT = 3500
 DIAGNOSTIC_DETAIL_LIMIT = 600
 BROWSER_RETRY_REASON = "browser_startup_failed"
@@ -66,8 +74,22 @@ class BrowserCleanupError(RuntimeError):
 
 TG_BOT_TOKEN = ""
 TG_CHAT_ID = ""
+PROXY_SERVER = ""
 SENSITIVE_VALUES: list[str] = []
 PRIVACY_DISMISS_REPORTED = False
+
+
+def describe_proxy(proxy: str) -> str:
+    """Describe a proxy URL without exposing its credentials."""
+    text = (proxy or "").strip()
+    if not text:
+        return "none (direct)"
+    parsed = urlparse(text if "://" in text else f"http://{text}")
+    host = parsed.hostname or "?"
+    port = f":{parsed.port}" if parsed.port else ""
+    scheme = parsed.scheme or "http"
+    auth = "with auth" if parsed.username else "no auth"
+    return f"{scheme}://{host}{port} ({auth})"
 
 
 def _load_dotenv(path: str | Path = ".env") -> None:
@@ -122,7 +144,7 @@ def consume_secret(name: str) -> str:
 
 
 def scrub_browser_environment() -> None:
-    for name in ("TOKENS", "TOPGG_COOKIES_JSON", "TG_BOT_TOKEN", "TG_CHAT_ID"):
+    for name in ("TOKENS", "TOPGG_COOKIES_JSON", "TG_BOT_TOKEN", "TG_CHAT_ID", "TOPGG_PROXY"):
         os.environ.pop(name, None)
         os.environ.pop(f"{name}_FILE", None)
 
@@ -299,6 +321,14 @@ def is_captcha_related_result(result: dict) -> bool:
     )
 
 
+def is_challenge_related_result(result: dict) -> bool:
+    """Edge challenge results are terminal and need their own evidence path."""
+    return (
+        result.get("status") == "challenged"
+        or "challenge" in str(result.get("detail", "")).casefold()
+    )
+
+
 def is_retryable_result(result: dict) -> bool:
     return result.get("status") in TRANSIENT_STATUSES
 
@@ -416,7 +446,7 @@ def _normalize_cookie(cookie: dict, line_number: int = 0) -> dict:
 
     domain = cookie.get("domain", ".top.gg")
     path = cookie.get("path", "/")
-    if not isinstance(domain, str) or domain.lower() not in {"top.gg", ".top.gg"}:
+    if not isinstance(domain, str) or domain.lower() not in {".top.gg", "top.gg"}:
         raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid domain")
     if not isinstance(path, str) or not path.startswith("/"):
         raise ValueError(f"{prefix} Auth.js cookie {name!r} has invalid path")
@@ -483,6 +513,7 @@ def load_topgg_cookies(
             raise ValueError(f"TOPGG_COOKIES_JSON line {index} must be a JSON array")
 
         authjs = []
+        cf_cookies = []
         for item_index, cookie in enumerate(cookies, 1):
             if not isinstance(cookie, dict):
                 raise ValueError(
@@ -490,13 +521,22 @@ def load_topgg_cookies(
                 )
             domain = str(cookie.get("domain", "")).lower()
             name = str(cookie.get("name", ""))
-            if domain in {"top.gg", ".top.gg"} and "authjs" in name.lower():
+            if domain not in {"top.gg", ".top.gg"}:
+                continue
+            lowered = name.lower()
+            if "authjs" in lowered:
                 authjs.append(_normalize_cookie(cookie, index))
-        if not authjs:
+            elif lowered in CLOUDFLARE_COOKIE_NAMES:
+                # Cloudflare clearance cookies are what let a browser skip the
+                # edge challenge. They must survive the export filter, otherwise
+                # a browser that already passed the challenge still gets
+                # challenged on every run.
+                cf_cookies.append(_normalize_cookie(cookie, index))
+        if not authjs and not cf_cookies:
             raise ValueError(
                 f"TOPGG_COOKIES_JSON line {index} contains no top.gg Auth.js cookies"
             )
-        account_cookies.append(authjs)
+        account_cookies.append(cf_cookies + authjs)
     return account_cookies
 
 
@@ -683,6 +723,30 @@ async def inject_topgg_cookies(browser: Any, cookies: list[dict]) -> None:
         await browser.cookies.set_all(params)
 
 
+async def is_edge_challenge(tab: Any) -> bool:
+    """Detect a Cloudflare edge challenge page.
+
+    top.gg serves a managed challenge ("Just a moment...") that blocks every
+    request, including the session API. A challenge page must never be read as
+    "session invalid": the request never reached the origin, so the cookie
+    state is unknown rather than rejected.
+    """
+    return bool(await evaluate(tab, """(() => {
+        const title = (document.title || '').toLowerCase();
+        const body = document.body ? document.body.innerText.toLowerCase() : '';
+        if (title.includes('just a moment')) return true;
+        if (body.includes('performing security verification')) return true;
+        if (body.includes('verify you are not a bot')) return true;
+        if (body.includes('checking your browser before accessing')) return true;
+        if (body.includes('enable javascript and cookies to continue')) return true;
+        if (body.includes('attention required')) return true;
+        if (body.includes('ray id')) return true;
+        return Boolean(document.querySelector(
+            '#challenge-running, #challenge-stage, #challenge-error-text, #cf-chl-widget'
+        ));
+    })()"""))
+
+
 async def is_topgg_authenticated(tab: Any) -> bool:
     result = await evaluate(tab, """(async () => {
         try {
@@ -697,16 +761,58 @@ async def is_topgg_authenticated(tab: Any) -> bool:
     return bool(result)
 
 
+async def topgg_session_probe(tab: Any) -> str:
+    """Classify the session API result without conflating edge blocks.
+
+    Returns AUTHENTICATED, AUTH_INVALID, or AUTH_CHALLENGED. A 403/429/503 or
+    a non-JSON body means the edge blocked the request, so the session state
+    is unknown and the cookie must not be treated as expired.
+    """
+    result = await evaluate(tab, """(async () => {
+        try {
+            const response = await fetch('/api/auth/session', {credentials: 'include'});
+            const contentType = response.headers.get('content-type') || '';
+            let payload = null;
+            try { payload = await response.json(); } catch (_) { payload = null; }
+            return {
+                status: response.status,
+                contentType: contentType,
+                hasUser: Boolean(payload && payload.user),
+                isJson: contentType.includes('json')
+            };
+        } catch (_) {
+            return {status: 0, contentType: '', hasUser: false, isJson: false};
+        }
+    })()""")
+    if not isinstance(result, dict):
+        return AUTH_INVALID
+    status = result.get("status")
+    if result.get("hasUser"):
+        return AUTHENTICATED
+    if status in AUTH_BLOCKED_STATUSES or not result.get("isJson"):
+        return AUTH_CHALLENGED
+    return AUTH_INVALID
+
+
 async def topgg_auth_state(tab: Any) -> str:
     await dismiss_privacy_overlay(tab)
-    if await is_topgg_authenticated(tab):
+    probe = await topgg_session_probe(tab)
+    if probe == AUTHENTICATED:
         return AUTHENTICATED
+    if probe == AUTH_CHALLENGED:
+        print("  🧱 top.gg edge challenge blocked the session probe")
+        return AUTH_CHALLENGED
     if await is_turnstile_present(tab):
         if not await solve_turnstile(tab):
             return AUTH_CAPTCHA_REQUIRED
         await asyncio.sleep(2)
-        if await is_topgg_authenticated(tab):
+        probe = await topgg_session_probe(tab)
+        if probe == AUTHENTICATED:
             return AUTHENTICATED
+        if probe == AUTH_CHALLENGED:
+            return AUTH_CHALLENGED
+    if await is_edge_challenge(tab):
+        return AUTH_CHALLENGED
     return AUTH_INVALID
 
 
@@ -723,6 +829,8 @@ async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) 
         print("  ✅ Authenticated via top.gg cookies")
     elif state == AUTH_CAPTCHA_REQUIRED:
         print("  🔒 CAPTCHA blocked top.gg cookie authentication")
+    elif state == AUTH_CHALLENGED:
+        print("  🧱 Edge challenge blocked top.gg cookie authentication")
     else:
         print("  ⚠️  Cookie session invalid or expired")
     return state
@@ -758,7 +866,12 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
     await settle_privacy_overlay(tab)
     state = await topgg_auth_state(tab)
     if state != AUTH_INVALID:
-        print("  ✅ Already logged into top.gg" if state == AUTHENTICATED else "  🔒 CAPTCHA blocked top.gg session probe")
+        if state == AUTHENTICATED:
+            print("  ✅ Already logged into top.gg")
+        elif state == AUTH_CHALLENGED:
+            print("  🧱 Edge challenge blocked top.gg session probe")
+        else:
+            print("  🔒 CAPTCHA blocked top.gg session probe")
         return state
 
     # ponytail: avoid discord.com/login navigation; token goes into discord.com
@@ -788,7 +901,7 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
     if state == AUTHENTICATED:
         print("  ✅ Session established without OAuth redirect")
         return state
-    if state == AUTH_CAPTCHA_REQUIRED:
+    if state in (AUTH_CAPTCHA_REQUIRED, AUTH_CHALLENGED):
         return state
 
     marker = "data-auto-login"
@@ -1108,23 +1221,31 @@ async def close_browser(browser: Any) -> None:
 async def start_browser() -> Any:
     last_error = None
     last_error_detail = "no detail"
+    # Read the proxy before scrubbing: scrub_browser_environment() removes
+    # credential-bearing variables so they never reach the Chrome process.
+    proxy_server = (PROXY_SERVER or os.environ.get("TOPGG_PROXY", "")).strip()
     scrub_browser_environment()
     for attempt in range(1, BROWSER_START_RETRIES + 1):
         profile_path = tempfile.mkdtemp(prefix="auto-vote-topgg-")
-        config = uc.Config(
-            user_data_dir=profile_path,
-            headless=False,
-            sandbox=True,
-            browser_executable_path=os.environ.get("CHROME_BIN") or None,
-            browser_args=[
-                "--window-size=1280,720",
-                "--disable-dev-shm-usage",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-        )
+        browser_args = [
+            "--window-size=1280,720",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+        if proxy_server:
+            browser_args.append(f"--proxy-server={proxy_server}")
+        config_kwargs = {
+            "user_data_dir": profile_path,
+            "headless": False,
+            "sandbox": True,
+            "browser_executable_path": os.environ.get("CHROME_BIN") or None,
+            "browser_args": browser_args,
+        }
+        config = uc.Config(**config_kwargs)
         browser = uc.Browser(config)
         browser._security_profile_path = profile_path
+        browser._proxy_server = proxy_server
         try:
             await browser.start()
             await browser.get("about:blank")
@@ -1156,7 +1277,22 @@ async def _run_account(
     capture_auth_failure: bool = False,
 ) -> list[dict]:
     browser = await start_browser()
-    tab = next(iter(browser))
+    proxy_server = getattr(browser, "_proxy_server", "")
+    if not isinstance(proxy_server, str):
+        proxy_server = ""
+    proxy_server = proxy_server.strip()
+    if proxy_server:
+        # The default tab belongs to the initial browser context, which has no
+        # proxy attached. Create a dedicated context so every request, cookies
+        # included, goes through the configured proxy.
+        tab = await browser.create_context(
+            url="about:blank",
+            new_window=True,
+            proxy_server=proxy_server,
+        )
+        print(f"  🌐 Using proxy {describe_proxy(proxy_server)}")
+    else:
+        tab = next(iter(browser))
     results = []
     try:
         auth_state = AUTH_INVALID
@@ -1181,6 +1317,25 @@ async def _run_account(
             )
             if path:
                 result["screenshot_path"] = path
+            return [result]
+        if auth_state == AUTH_CHALLENGED:
+            # The edge challenge blocks every request from this IP. Retrying on
+            # the same runner/IP cannot clear it, so report it honestly as a
+            # terminal state instead of burning all retries.
+            result = {
+                "bot_id": "all",
+                "status": "challenged",
+                "detail": "top.gg edge challenge blocked authentication",
+                "account_id": account_id,
+            }
+            if capture_auth_failure:
+                path = await browser_screenshot(
+                    tab,
+                    f"screenshots/auth_{account_id}_challenged.png",
+                    required=True,
+                )
+                if path:
+                    result["screenshot_path"] = path
             return [result]
         if auth_state != AUTHENTICATED:
             result = {
@@ -1266,7 +1421,10 @@ async def process_account(
         if attempt_results and attempt_results[0].get("bot_id") == "all":
             last_account_error = attempt_results[0]
             if not is_retryable_result(last_account_error):
-                print(f"{prefix} 🔒 Authentication requires manual CAPTCHA")
+                if last_account_error.get("status") == "challenged":
+                    print(f"{prefix} 🧱 Edge challenge blocked authentication — not retrying on this IP")
+                else:
+                    print(f"{prefix} 🔒 Authentication requires manual CAPTCHA")
                 return attempt_results
             print(f"{prefix} ❌ Authentication attempt {attempt} failed")
             continue
@@ -1298,7 +1456,7 @@ def build_notification(all_results: list[list[dict]], now: str) -> str:
             detail = escape(str(result.get("detail", "")))
             icon = {
                 "success": "✅", "cooldown": "⏳", "uncertain": "⚠️",
-                "captcha_required": "🔒",
+                "captcha_required": "🔒", "challenged": "🧱",
             }.get(status, "❌")
             lines.append(f"  {icon} {bot_id}: {detail}")
         lines.append("")
@@ -1314,17 +1472,21 @@ def has_business_failure(all_results: list[list[dict]]) -> bool:
 
 
 async def main() -> int:
-    global TG_BOT_TOKEN, TG_CHAT_ID, SENSITIVE_VALUES
+    global TG_BOT_TOKEN, TG_CHAT_ID, SENSITIVE_VALUES, PROXY_SERVER
     tokens_raw = consume_secret("TOKENS")
     cookies_raw = consume_secret("TOPGG_COOKIES_JSON")
     TG_BOT_TOKEN = consume_secret("TG_BOT_TOKEN").strip()
     TG_CHAT_ID = consume_secret("TG_CHAT_ID").strip()
+    # consume_secret removes the variable from the environment, so the proxy
+    # URL has to be captured here and handed to the browser explicitly.
+    PROXY_SERVER = consume_secret("TOPGG_PROXY").strip()
     tokens = load_tokens(tokens_raw)
     SENSITIVE_VALUES = [
         tokens_raw,
         cookies_raw,
         TG_BOT_TOKEN,
         TG_CHAT_ID,
+        PROXY_SERVER,
         *tokens,
     ]
     scrub_browser_environment()
@@ -1340,6 +1502,7 @@ async def main() -> int:
     print(f"   Tokens  : {total}")
     print(f"   Cookies : {sum(bool(cookies) for cookies in all_cookies)}/{total} account(s)")
     print(f"   Bots    : {len(bot_ids)}")
+    print(f"   Proxy   : {describe_proxy(PROXY_SERVER)}")
     print(f"   Time    : {now}")
 
     all_results = []
