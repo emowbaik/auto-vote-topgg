@@ -1503,3 +1503,50 @@ class PageSettleTests(unittest.IsolatedAsyncioTestCase):
     async def test_returns_false_when_challenge_never_clears(self, evaluate, _sleep):
         evaluate.return_value = "Just a moment..."
         self.assertFalse(await vote.wait_for_page_settled(AsyncMock(), timeout=6))
+
+
+class CookieInjectionScopeTests(unittest.IsolatedAsyncioTestCase):
+    """The cookie must land in the context that actually requests top.gg."""
+
+    @patch("vote.uc.cdp.network.set_cookies")
+    async def test_tab_is_used_when_provided(self, set_cookies):
+        tab = AsyncMock()
+        browser = AsyncMock()
+        cookie = {
+            "name": "__Secure-authjs.session-token",
+            "value": "v",
+            "domain": "top.gg",
+            "path": "/",
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "Lax",
+        }
+
+        await vote.inject_topgg_cookies(browser, [cookie], tab)
+
+        set_cookies.assert_called_once()
+        browser.cookies.set_all.assert_not_awaited()
+        self.assertIsNotNone(tab.send.await_args)
+
+    @patch("vote.uc.cdp.network.set_cookies")
+    async def test_browser_fallback_without_tab(self, set_cookies):
+        browser = AsyncMock()
+        cookie = {
+            "name": "__Secure-authjs.session-token",
+            "value": "v",
+            "domain": "top.gg",
+            "path": "/",
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "Lax",
+        }
+
+        await vote.inject_topgg_cookies(browser, [cookie])
+
+        browser.cookies.set_all.assert_awaited_once()
+        set_cookies.assert_not_called()
+
+    @patch("vote.uc.cdp.network.set_cookies")
+    async def test_no_cookies_is_a_noop(self, set_cookies):
+        await vote.inject_topgg_cookies(AsyncMock(), [], AsyncMock())
+        set_cookies.assert_not_called()
