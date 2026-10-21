@@ -95,7 +95,7 @@ def _load_dotenv(path: str | Path = ".env") -> None:
 _load_dotenv()
 
 DEBUG = os.environ.get("DEBUG", "").strip() == "1"
-SEND_ERROR_SCREENSHOTS = os.environ.get("SEND_ERROR_SCREENSHOTS", "").strip() == "1"
+SEND_ERROR_SCREENSHOTS = os.environ.get("SEND_ERROR_SCREENSHOTS", "").strip().lower() in {"1", "on", "true", "yes"}
 
 
 def dbg(msg: str) -> None:
@@ -1133,10 +1133,14 @@ async def start_browser() -> Any:
             last_error = exc
             process = getattr(browser, "_process", None)
             diagnostic = await chrome_process_diagnostics(process)
-            await close_browser(browser)
             last_error_detail = f"{type(exc).__name__}: {safe_exception_detail(exc)}"
             if diagnostic:
                 last_error_detail = f"{last_error_detail}; chrome {diagnostic}"
+            # Cleanup must never mask the real startup failure: a raised
+            # BrowserCleanupError here would hide BrowserStartupError and
+            # suppress the fresh-runner retry marker.
+            with suppress(Exception):
+                await close_browser(browser)
             dbg(f"Browser startup {attempt}/{BROWSER_START_RETRIES} failed: {type(exc).__name__}")
             if attempt < BROWSER_START_RETRIES:
                 await asyncio.sleep(BROWSER_START_RETRY_SEC)
