@@ -36,6 +36,9 @@ AUTH_INVALID = "invalid"
 AUTH_CAPTCHA_REQUIRED = "captcha_required"
 AUTH_CHALLENGED = "challenged"
 AUTH_BLOCKED_STATUSES = frozenset({403, 429, 503})
+SESSION_PROBE_ATTEMPTS = 10
+SESSION_PROBE_RETRY_SEC = 5
+PAGE_SETTLE_TIMEOUT_SEC = 60
 CLOUDFLARE_COOKIE_NAMES = frozenset({
     "cf_clearance",
     "cf_chl_2",
@@ -805,7 +808,16 @@ async def topgg_auth_state(tab: Any) -> str:
     # edge answers that XHR with a challenge document instead of JSON, so the
     # overlay has to be fully dismissed and allowed to settle before probing.
     await settle_privacy_overlay(tab)
-    probe = await topgg_session_probe(tab)
+    # The edge challenge finishes clearing a few seconds after the document
+    # itself has loaded, and the first probes during that window are answered
+    # with a challenge document. Retry instead of reporting a false block.
+    probe = AUTH_CHALLENGED
+    for attempt in range(1, SESSION_PROBE_ATTEMPTS + 1):
+        probe = await topgg_session_probe(tab)
+        if probe != AUTH_CHALLENGED:
+            break
+        if attempt < SESSION_PROBE_ATTEMPTS:
+            await asyncio.sleep(SESSION_PROBE_RETRY_SEC)
     if probe == AUTHENTICATED:
         return AUTHENTICATED
     if probe == AUTH_CHALLENGED:
@@ -825,6 +837,23 @@ async def topgg_auth_state(tab: Any) -> str:
     return AUTH_INVALID
 
 
+async def wait_for_page_settled(tab: Any, timeout: int = PAGE_SETTLE_TIMEOUT_SEC) -> bool:
+    """Wait until the top.gg document is the real page, not the challenge.
+
+    The edge challenge finishes clearing well after the document itself has
+    loaded, and while it is still clearing the page keeps the interstitial
+    title. Waiting for the title to change keeps the rest of the flow from
+    probing a page the edge is still deciding about.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        title = str(await evaluate(tab, "document.title || ''"))
+        if title and "just a moment" not in title.casefold():
+            return True
+        await asyncio.sleep(2)
+    return False
+
+
 async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) -> str:
     if not cookies:
         return AUTH_INVALID
@@ -833,6 +862,7 @@ async def login_with_cookies(tab: Any, cookies: list[dict], bot_ids: list[str]) 
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(3)
     await settle_privacy_overlay(tab)
+    await wait_for_page_settled(tab)
     state = await topgg_auth_state(tab)
     if state == AUTHENTICATED:
         print("  ✅ Authenticated via top.gg cookies")
@@ -873,6 +903,7 @@ async def discord_oauth_login(tab: Any, token: str, bot_ids: list[str]) -> str:
     await tab.get(f"https://top.gg/bot/{bot_ids[0]}/vote")
     await asyncio.sleep(2)
     await settle_privacy_overlay(tab)
+    await wait_for_page_settled(tab)
     state = await topgg_auth_state(tab)
     if state != AUTH_INVALID:
         if state == AUTHENTICATED:
@@ -1053,6 +1084,7 @@ async def vote_for_bot(tab: Any, bot_id: str, account_id: str = "unknown") -> di
     await tab.get(f"https://top.gg/bot/{bot_id}/vote")
     await asyncio.sleep(3)
     await settle_privacy_overlay(tab)
+    await wait_for_page_settled(tab)
     text = (await body_text(tab)).lower()
 
     if "must be logged in" in text or "login to vote" in text:

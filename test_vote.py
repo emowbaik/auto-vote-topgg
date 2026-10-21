@@ -618,9 +618,12 @@ class RetryOrchestrationTests(unittest.IsolatedAsyncioTestCase):
 class AuthenticationStateTests(unittest.IsolatedAsyncioTestCase):
     @patch("builtins.print")
     @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.wait_for_page_settled", new_callable=AsyncMock)
     @patch("vote.topgg_auth_state", new_callable=AsyncMock)
     @patch("vote.inject_topgg_cookies", new_callable=AsyncMock)
-    async def test_cookie_auth_propagates_captcha(self, _inject, auth_state, _sleep, _print):
+    async def test_cookie_auth_propagates_captcha(
+        self, _inject, auth_state, _settled, _sleep, _print
+    ):
         auth_state.return_value = vote.AUTH_CAPTCHA_REQUIRED
         tab = AsyncMock()
 
@@ -1451,3 +1454,52 @@ class PrivacyOverlayProbeOrderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, vote.AUTHENTICATED)
         self.assertEqual(calls, ["settle", "probe"])
+
+
+class SessionProbeRetryTests(unittest.IsolatedAsyncioTestCase):
+    """The edge challenge clears a few seconds after the document loads."""
+
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.is_edge_challenge", new_callable=AsyncMock)
+    @patch("vote.settle_privacy_overlay", new_callable=AsyncMock)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock)
+    @patch("vote.topgg_session_probe", new_callable=AsyncMock)
+    async def test_probe_retries_until_challenge_clears(self, probe, turnstile, _settle, _edge, _sleep):
+        probe.side_effect = [vote.AUTH_CHALLENGED] * 3 + [vote.AUTH_INVALID]
+        turnstile.return_value = False
+        _edge.return_value = False
+
+        state = await vote.topgg_auth_state(AsyncMock())
+
+        self.assertEqual(state, vote.AUTH_INVALID)
+        self.assertEqual(probe.await_count, 4)
+
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.is_edge_challenge", new_callable=AsyncMock)
+    @patch("vote.settle_privacy_overlay", new_callable=AsyncMock)
+    @patch("vote.is_turnstile_present", new_callable=AsyncMock)
+    @patch("vote.topgg_session_probe", new_callable=AsyncMock)
+    async def test_probe_gives_up_after_bounded_attempts(self, probe, turnstile, _settle, _edge, _sleep):
+        probe.return_value = vote.AUTH_CHALLENGED
+        turnstile.return_value = False
+        _edge.return_value = False
+
+        state = await vote.topgg_auth_state(AsyncMock())
+
+        self.assertEqual(state, vote.AUTH_CHALLENGED)
+        self.assertEqual(probe.await_count, vote.SESSION_PROBE_ATTEMPTS)
+
+
+class PageSettleTests(unittest.IsolatedAsyncioTestCase):
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.evaluate", new_callable=AsyncMock)
+    async def test_waits_until_challenge_title_is_gone(self, evaluate, _sleep):
+        evaluate.side_effect = ["Just a moment...", "Just a moment...", "Voting for Lofi Radio"]
+        self.assertTrue(await vote.wait_for_page_settled(AsyncMock(), timeout=30))
+        self.assertEqual(evaluate.await_count, 3)
+
+    @patch("vote.asyncio.sleep", new_callable=AsyncMock)
+    @patch("vote.evaluate", new_callable=AsyncMock)
+    async def test_returns_false_when_challenge_never_clears(self, evaluate, _sleep):
+        evaluate.return_value = "Just a moment..."
+        self.assertFalse(await vote.wait_for_page_settled(AsyncMock(), timeout=6))
