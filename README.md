@@ -42,6 +42,86 @@ top.gg authenticated
     └── verified → click Vote → confirm success/cooldown
 ```
 
+## Edge Challenge and Proxy Support
+
+top.gg sits behind a Cloudflare edge challenge ("Just a moment..." / "Performing
+security verification"). The challenge intercepts **every** request, including
+`/api/auth/session`, so a blocked request is not evidence of an invalid session.
+
+- `is_edge_challenge()` detects the interstitial by title, body text, and challenge DOM markers.
+- `topgg_session_probe()` classifies the session API result as `authenticated`, `invalid`, or `challenged`. A `403`/`429`/`503` or a non-JSON body means the edge blocked the request, so the cookie is treated as **unknown**, not expired.
+- A blocked account is reported with status `challenged` and is **terminal** — the challenge cannot be cleared by retrying from the same runner IP, so all three retries are skipped instead of burning the budget.
+
+### Cloudflare clearance cookies
+
+The cookie export filter keeps Auth.js session cookies **and** Cloudflare
+clearance cookies (`cf_clearance`, `cf_chl_2`, `__cf_bm`, `_cfuvid`). Clearance
+cookies are what let a browser skip the challenge, so dropping them guarantees
+that a browser which already passed the challenge still gets challenged on
+every run. Export them from a browser session that has already passed the
+challenge, and keep the export fresh — Auth.js sessions expire after roughly
+30 days.
+
+### `TOPGG_PROXY` (optional)
+
+Set the `TOPGG_PROXY` secret to route the automation through a proxy:
+
+```
+TOPGG_PROXY=http://user:password@host:port
+```
+
+- The tab is created in a dedicated browser context with the proxy attached, so cookies and every request go through it.
+- The URL is consumed as a secret, scrubbed from the environment before Chrome starts, and never printed; the run log only shows `scheme://host:port (with auth)`.
+- Validated with `scripts/check_proxy.py`, which reports whether the exit reaches top.gg or is still challenged:
+
+```bash
+TOPGG_PROXY=http://host:port python scripts/check_proxy.py
+```
+
+> Free public proxy lists (TheSpeedX, ProxyScrape, and similar) are **not**
+> sufficient here. Measured on 2026-10-21: of 2,965 listed HTTP proxies only
+> 211 (8.9%) were functionally able to reach the internet at all, and **none**
+> of them reached top.gg without still being served the Cloudflare challenge.
+> Residential egress is the requirement, not merely a working proxy.
+
+## WARP Egress (recommended free path)
+
+top.gg's edge challenges datacenter ranges hard. A Cloudflare WARP egress is
+not challenged the same way and costs nothing.
+
+Enable it by setting the repository variable `TOPGG_USE_WARP` to `true`. The
+workflow then installs the official `warp-cli`, registers, connects in proxy
+mode, and exports `TOPGG_PROXY_AUTO=socks5://127.0.0.1:40000` for the run.
+
+```bash
+gh variable set TOPGG_USE_WARP -b true --repo emowbaik/auto-vote-topgg
+```
+
+Measured on 2026-10-21, top.gg through a WARP exit:
+
+| Probe | Result |
+|---|---|
+| runner egress (no WARP) | `Just a moment...` / `Performing security verification` (HTTP 403) |
+| WARP exit | `AS13335 Cloudflare, Inc.`, `hosting=false`, HTTP 200, real vote page |
+
+The official client is used on purpose: raw WireGuard UDP is filtered on both
+GitHub-hosted runners and this VPS (ports 2408, 500, 1701 and 4500 all time
+out), while `warp-cli` connects over a transport that is not filtered.
+
+### The `Accept` header matters
+
+A session probe without an explicit `Accept` header is challenged, even from a
+cleared WARP exit:
+
+| Request | Result |
+|---|---|
+| `fetch('/api/auth/session', {credentials: 'include'})` | HTTP 403, `cf-mitigated: challenge` |
+| `fetch('/api/auth/session', {credentials: 'include', headers: {'Accept': 'application/json, text/plain, */*'}})` | HTTP 200, `application/json` |
+
+The probe therefore always sends the JSON `Accept` header, and the consent
+overlay is fully settled before probing. A blocked XHR is never treated as an
+invalid session.
+
 ## Setup
 
 ### 1. Fork this repository

@@ -52,6 +52,39 @@ jobs:
           test -n "$CHROME_BIN" || { echo "No supported Chrome/Chromium executable found"; exit 1; }
           echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
 
+      - name: Set up Cloudflare WARP egress
+        if: ${{ vars.TOPGG_USE_WARP == 'true' }}
+        run: |
+          set -euo pipefail
+          # WARP gives the runner a Cloudflare-owned egress address, which
+          # top.gg's edge does not challenge the way it challenges datacenter
+          # ranges. The official client is used because raw WireGuard UDP is
+          # filtered on hosted runners.
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+            | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cloudflare-warp
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode proxy
+          sudo warp-cli --accept-tos connect
+          for i in $(seq 1 30); do
+            if sudo warp-cli --accept-tos status 2>/dev/null | grep -q "Connected"; then break; fi
+            sleep 2
+          done
+          sudo warp-cli --accept-tos status
+          # A separate variable name is required: the vote step declares
+          # TOPGG_PROXY from secrets, and a step-level env entry overrides
+          # GITHUB_ENV, so the auto-detected value would be discarded.
+          echo "TOPGG_PROXY_AUTO=socks5://127.0.0.1:40000" >> "$GITHUB_ENV"
+          echo "WARP exit IP: $(curl -s -m 25 -x socks5h://127.0.0.1:40000 'http://ip-api.com/json/?fields=query,countryCode,as,hosting')"
+          curl -s -m 30 -x socks5h://127.0.0.1:40000 -o /tmp/warp_probe.html \
+            -w 'top.gg via WARP: HTTP %{http_code}\n' \
+            "https://top.gg/bot/830530156048285716/vote" || true
+          grep -ioE "just a moment|performing security verification" /tmp/warp_probe.html 2>/dev/null \
+            | sort -u || echo "no challenge markers in the WARP response"
+
       - name: Run vote
         id: run_vote
         env:
@@ -61,6 +94,7 @@ jobs:
           TG_CHAT_ID:                ${{ secrets.TG_CHAT_ID }}
           SEND_ERROR_SCREENSHOTS:    ${{ secrets.SEND_ERROR_SCREENSHOTS }}
           TOPGG_COOKIES_JSON:        ${{ secrets.TOPGG_COOKIES_JSON }}
+          TOPGG_PROXY:               ${{ secrets.TOPGG_PROXY }}
         run: |
           secret_dir="$(mktemp -d)"
           chmod 700 "$secret_dir"
@@ -78,7 +112,8 @@ jobs:
           write_secret TOPGG_COOKIES_JSON "$TOPGG_COOKIES_JSON"
           write_secret TG_BOT_TOKEN "$TG_BOT_TOKEN"
           write_secret TG_CHAT_ID "$TG_CHAT_ID"
-          unset TOKENS TOPGG_COOKIES_JSON TG_BOT_TOKEN TG_CHAT_ID
+          write_secret TOPGG_PROXY "$TOPGG_PROXY"
+          unset TOKENS TOPGG_COOKIES_JSON TG_BOT_TOKEN TG_CHAT_ID TOPGG_PROXY
           export NEXT_VOTE_STATE_FILE="$RUNNER_TEMP/next-vote.json"
           export BROWSER_RETRY_STATE_FILE="$RUNNER_TEMP/browser-startup-retry.json"
           set +e
