@@ -384,7 +384,7 @@ def main() -> int:
     for pr in prs:
         log(f"\n#{pr['number']} {pr['title']}")
 
-    branch = f"chore/dependabot-{time.strftime('%Y%m%d-%H%M')}"
+    branch = f"chore/dependabot-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     run(["git", "checkout", "--quiet", "-B", branch, f"origin/{BASE}"], cwd=workdir)
 
     applied: list[dict] = []
@@ -459,7 +459,14 @@ def main() -> int:
         "commit", "--quiet", "-m",
         f"chore(deps): consolidate dependabot updates ({numbers})",
     ], cwd=workdir)
-    run(["git", "push", "--quiet", "-u", "origin", branch], cwd=workdir)
+    current = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=workdir).stdout.strip()
+    if current != branch:
+        raise RuntimeError(
+            f"HEAD moved to '{current}' while preparing '{branch}' — is another "
+            "consolidation run using this clone? (wrap invocations in flock)"
+        )
+    run(["git", "push", "--quiet", "-u", "origin", f"HEAD:refs/heads/{branch}"],
+        cwd=workdir)
     log(f"\npushed {branch}")
 
     pr_url = gh(
