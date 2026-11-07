@@ -9,8 +9,8 @@ idna==3.18 \
     --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2
 mss==10.2.0 \
     --hash=sha256:e79f428899280e7e64e38365b5bfed683851ebea807eeaeadaf06eb8e0d67197
-nodriver==0.50.3 \
-    --hash=sha256:a053533108c14c309a7613445e6c7fb460b6b165c144a062e1b2f39e4f7b396b
+nodriver==0.50.99 \
+    --hash=sha256:8d5dd09e2ecb73829c970989db110dbae5b48937bad86745fb3175969a03d93d
 numpy==2.2.6 \
     --hash=sha256:ba10f8411898fc418a521833e014a77d3ca01c15b0c6cdcce6a0d2897e6dbbdf
 opencv-python-headless==5.0.0.93 \
